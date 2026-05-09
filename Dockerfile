@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/currenc
 
 FROM alpine:3.22
 
-RUN addgroup -S app && adduser -S app -G app
+RUN apk add --no-cache ca-certificates && addgroup -S app && adduser -S app -G app
 WORKDIR /app
 
 COPY --from=builder /out/currency-converter-bot /app/currency-converter-bot
