@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,8 +29,11 @@ type Bot struct {
 }
 
 type session struct {
-	From string
-	To   string
+	From              string
+	To                string
+	Multiplier        float64
+	ModifyFromPercent float64
+	ModifyToPercent   float64
 }
 
 func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot {
@@ -92,10 +97,18 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		_ = b.sendMessage(ctx, chatID, b.helpText(userID))
 	case isCommand(text, "/list"):
 		_ = b.sendMessage(ctx, chatID, supportedCurrenciesText())
+	case isCommand(text, "/settings"):
+		b.showSettings(ctx, chatID, userID)
 	case isCommand(text, "/from"):
 		b.setCurrency(ctx, chatID, userID, text, true)
 	case isCommand(text, "/to"):
 		b.setCurrency(ctx, chatID, userID, text, false)
+	case isCommand(text, "/multi"):
+		b.setMultiplier(ctx, chatID, userID, text)
+	case isCommand(text, "/modify_from"):
+		b.setModifier(ctx, chatID, userID, text, true)
+	case isCommand(text, "/modify_to"):
+		b.setModifier(ctx, chatID, userID, text, false)
 	default:
 		b.convertMessage(ctx, chatID, userID, text)
 	}
@@ -133,6 +146,68 @@ func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string
 	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: %s -> %s", s.From, s.To))
 }
 
+func (b *Bot) setMultiplier(ctx context.Context, chatID, userID int64, text string) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		_ = b.sendMessage(ctx, chatID, "Укажите множитель: /multi 1000. Для сброса используйте /multi 1.")
+		return
+	}
+
+	multiplier, err := parseMultiplier(fields[1])
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, "Множитель должен быть положительным числом, например 1000, 10.5 или 1.")
+		return
+	}
+
+	s := b.getSession(userID)
+	s.Multiplier = multiplier
+	b.setSession(userID, s)
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: входная сумма будет умножаться на %s.", formatNumber(multiplier)))
+}
+
+func (b *Bot) setModifier(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
+	fields := strings.Fields(text)
+	command := "/modify_to"
+	if isFrom {
+		command = "/modify_from"
+	}
+	if len(fields) < 2 {
+		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Укажите процент: %s 1.5. Для сброса используйте %s 0.", command, command))
+		return
+	}
+
+	percent, err := parseModifierPercent(fields[1])
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, "Процент должен быть числом, например 1.5, +1,5 или -2.")
+		return
+	}
+
+	s := b.getSession(userID)
+	if isFrom {
+		s.ModifyFromPercent = percent
+	} else {
+		s.ModifyToPercent = percent
+	}
+	b.setSession(userID, s)
+
+	if isFrom {
+		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: входная сумма будет изменяться на %s.", formatPercent(percent)))
+		return
+	}
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: результат будет изменяться на %s.", formatPercent(percent)))
+}
+
+func (b *Bot) showSettings(ctx context.Context, chatID, userID int64) {
+	s := b.getSession(userID)
+	snapshot, err := b.rates.Get(ctx)
+	if err != nil {
+		b.log.Error("rates unavailable", "error", err)
+		_ = b.sendMessage(ctx, chatID, settingsText(s, rates.Snapshot{}))
+		return
+	}
+	_ = b.sendMessage(ctx, chatID, settingsText(s, snapshot))
+}
+
 func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text string) {
 	amount, amountCount, err := convert.ParseAmounts(text)
 	if err != nil {
@@ -148,26 +223,37 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		return
 	}
 
-	result, err := rates.Convert(amount, s.From, s.To, snapshot)
+	multipliedAmount := amount * s.Multiplier
+	effectiveAmount := applyPercent(multipliedAmount, s.ModifyFromPercent)
+	baseResult, err := rates.Convert(effectiveAmount, s.From, s.To, snapshot)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте /from и /to.", err.Error()))
 		return
 	}
+	result := applyPercent(baseResult, s.ModifyToPercent)
+
 	unitRate, err := rates.Convert(1, s.From, s.To, snapshot)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте /from и /to.", err.Error()))
 		return
 	}
+	unitRate = applyPercent(applyPercent(unitRate*s.Multiplier, s.ModifyFromPercent), s.ModifyToPercent)
 
-	replyPrefix := fmt.Sprintf("%s %s = %s %s", convert.FormatMoney(amount), s.From, convert.FormatMoney(result), s.To)
+	amountText := formatAmountWithSettings(amount, multipliedAmount, effectiveAmount, s.From)
+	replyPrefix := fmt.Sprintf("%s = %s %s", amountText, convert.FormatMoney(result), s.To)
 	if amountCount > 1 {
-		replyPrefix = fmt.Sprintf("Итого: %s %s = %s %s\nСтрок учтено: %d", convert.FormatMoney(amount), s.From, convert.FormatMoney(result), s.To, amountCount)
+		replyPrefix = fmt.Sprintf("Итого: %s = %s %s\nСтрок учтено: %d", amountText, convert.FormatMoney(result), s.To, amountCount)
+	}
+
+	unitLabel := fmt.Sprintf("Курс: 1 %s", s.From)
+	if hasInputSettings(s) {
+		unitLabel = "Расчет для 1 введенной единицы"
 	}
 
 	reply := fmt.Sprintf(
-		"%s\nКурс: 1 %s = %s %s",
+		"%s\n%s = %s %s",
 		replyPrefix,
-		s.From,
+		unitLabel,
 		convert.FormatMoney(unitRate),
 		s.To,
 	)
@@ -176,7 +262,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/list - список поддерживаемых валют\n/help - эта справка\n\nПосле выбора пары пришлите сумму, например: 12 345,67. Можно прислать несколько сумм, каждую с новой строки, я сложу их и переведу итог.", s.From, s.To)
+	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/multi 1000 - умножать входную сумму перед расчетом\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nПосле выбора пары пришлите сумму, например: 12 345,67. Можно прислать несколько сумм, каждую с новой строки, я сложу их и переведу итог.", s.From, s.To)
 }
 
 func (b *Bot) getSession(userID int64) session {
@@ -184,14 +270,14 @@ func (b *Bot) getSession(userID int64) session {
 	s, ok := b.sessions[userID]
 	b.mu.RUnlock()
 	if ok {
-		return s
+		return normalizeSession(s)
 	}
-	return session{From: b.cfg.DefaultFrom, To: b.cfg.DefaultTo}
+	return session{From: b.cfg.DefaultFrom, To: b.cfg.DefaultTo, Multiplier: 1}
 }
 
 func (b *Bot) setSession(userID int64, s session) {
 	b.mu.Lock()
-	b.sessions[userID] = s
+	b.sessions[userID] = normalizeSession(s)
 	b.mu.Unlock()
 }
 
@@ -262,6 +348,91 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+}
+
+func parseModifierPercent(raw string) (float64, error) {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, ",", "."))
+	if raw == "" {
+		return 0, errors.New("empty percent")
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, errors.New("invalid percent")
+	}
+	return value, nil
+}
+
+func parseMultiplier(raw string) (float64, error) {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, ",", "."))
+	if raw == "" {
+		return 0, errors.New("empty multiplier")
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 0, errors.New("invalid multiplier")
+	}
+	return value, nil
+}
+
+func applyPercent(value, percent float64) float64 {
+	return value * (1 + percent/100)
+}
+
+func formatAmountWithSettings(amount, multipliedAmount, effectiveAmount float64, currency string) string {
+	if amount == multipliedAmount && amount == effectiveAmount {
+		return fmt.Sprintf("%s %s", convert.FormatMoney(amount), currency)
+	}
+	if multipliedAmount == effectiveAmount {
+		return fmt.Sprintf("%s (%s) %s", convert.FormatMoney(amount), convert.FormatMoney(multipliedAmount), currency)
+	}
+	if amount == multipliedAmount {
+		return fmt.Sprintf("%s (%s) %s", convert.FormatMoney(amount), convert.FormatMoney(effectiveAmount), currency)
+	}
+	return fmt.Sprintf("%s (%s -> %s) %s", convert.FormatMoney(amount), convert.FormatMoney(multipliedAmount), convert.FormatMoney(effectiveAmount), currency)
+}
+
+func normalizeSession(s session) session {
+	if s.Multiplier == 0 {
+		s.Multiplier = 1
+	}
+	return s
+}
+
+func hasInputSettings(s session) bool {
+	s = normalizeSession(s)
+	return s.Multiplier != 1 || s.ModifyFromPercent != 0 || s.ModifyToPercent != 0
+}
+
+func formatNumber(value float64) string {
+	formatted := convert.FormatMoney(value)
+	formatted = strings.TrimRight(formatted, "0")
+	return strings.TrimRight(formatted, ",")
+}
+
+func settingsText(s session, snapshot rates.Snapshot) string {
+	s = normalizeSession(s)
+	updatedAt := "нет данных"
+	if !snapshot.FetchedAt.IsZero() {
+		updatedAt = snapshot.FetchedAt.UTC().Format("2006-01-02 15:04:05 UTC")
+	}
+
+	return fmt.Sprintf(
+		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nМножитель входной суммы: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
+		s.From,
+		s.To,
+		updatedAt,
+		formatNumber(s.Multiplier),
+		formatPercent(s.ModifyFromPercent),
+		formatPercent(s.ModifyToPercent),
+	)
+}
+
+func formatPercent(value float64) string {
+	formatted := formatNumber(value)
+	if value > 0 {
+		return "+" + formatted + "%"
+	}
+	return formatted + "%"
 }
 
 type apiResponse struct {
