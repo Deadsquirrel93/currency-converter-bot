@@ -18,7 +18,7 @@ func ParseAmount(input string) (float64, error) {
 		switch {
 		case unicode.IsDigit(r):
 			cleaned = append(cleaned, r)
-		case r == '.' || r == ',':
+		case (r == '.' || r == ',') && len(cleaned) > 0:
 			cleaned = append(cleaned, '.')
 			separatorIndex = len(cleaned) - 1
 		}
@@ -41,6 +41,33 @@ func ParseAmount(input string) (float64, error) {
 		return 0, ErrNoAmount
 	}
 	return value, nil
+}
+
+func ParseAmounts(input string) (float64, int, error) {
+	var total float64
+	count := 0
+
+	for _, line := range strings.Split(input, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		amount, err := ParseAmount(line)
+		if err != nil {
+			if errors.Is(err, ErrNoAmount) {
+				continue
+			}
+			return 0, 0, err
+		}
+		total += amount
+		count++
+	}
+
+	if count == 0 {
+		return 0, 0, ErrNoAmount
+	}
+	return total, count, nil
 }
 
 func FormatMoney(value float64) string {

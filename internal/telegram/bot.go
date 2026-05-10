@@ -134,9 +134,9 @@ func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string
 }
 
 func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text string) {
-	amount, err := convert.ParseAmount(text)
+	amount, amountCount, err := convert.ParseAmounts(text)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Не вижу сумму. Например: 12 345,67")
+		_ = b.sendMessage(ctx, chatID, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.")
 		return
 	}
 
@@ -159,12 +159,14 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		return
 	}
 
+	replyPrefix := fmt.Sprintf("%s %s = %s %s", convert.FormatMoney(amount), s.From, convert.FormatMoney(result), s.To)
+	if amountCount > 1 {
+		replyPrefix = fmt.Sprintf("Итого: %s %s = %s %s\nСтрок учтено: %d", convert.FormatMoney(amount), s.From, convert.FormatMoney(result), s.To, amountCount)
+	}
+
 	reply := fmt.Sprintf(
-		"%s %s = %s %s\nКурс: 1 %s = %s %s",
-		convert.FormatMoney(amount),
-		s.From,
-		convert.FormatMoney(result),
-		s.To,
+		"%s\nКурс: 1 %s = %s %s",
+		replyPrefix,
 		s.From,
 		convert.FormatMoney(unitRate),
 		s.To,
@@ -174,7 +176,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/list - список поддерживаемых валют\n/help - эта справка\n\nПосле выбора пары пришлите сумму, например: 12 345,67", s.From, s.To)
+	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/list - список поддерживаемых валют\n/help - эта справка\n\nПосле выбора пары пришлите сумму, например: 12 345,67. Можно прислать несколько сумм, каждую с новой строки, я сложу их и переведу итог.", s.From, s.To)
 }
 
 func (b *Bot) getSession(userID int64) session {
