@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,24 +31,65 @@ type Bot struct {
 }
 
 type session struct {
-	From              string
-	To                string
-	Multiplier        float64
-	ModifyFromPercent float64
-	ModifyToPercent   float64
+	From              string   `json:"from"`
+	To                string   `json:"to"`
+	With              []string `json:"with,omitempty"`
+	WithModify        bool     `json:"with_modify"`
+	Multiplier        float64  `json:"multiplier"`
+	ModifyFromPercent float64  `json:"modify_from_percent"`
+	ModifyToPercent   float64  `json:"modify_to_percent"`
+}
+
+func (s *session) UnmarshalJSON(raw []byte) error {
+	type sessionAlias session
+	var aux struct {
+		sessionAlias
+		With json.RawMessage `json:"with"`
+	}
+	if err := json.Unmarshal(raw, &aux); err != nil {
+		return err
+	}
+
+	*s = session(aux.sessionAlias)
+	if len(aux.With) == 0 || string(aux.With) == "null" {
+		return nil
+	}
+
+	var list []string
+	if err := json.Unmarshal(aux.With, &list); err == nil {
+		s.With = list
+		return nil
+	}
+
+	var single string
+	if err := json.Unmarshal(aux.With, &single); err != nil {
+		return err
+	}
+	if strings.TrimSpace(single) != "" {
+		s.With = []string{single}
+	}
+	return nil
 }
 
 func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot {
-	return &Bot{
+	b := &Bot{
 		cfg:      cfg,
 		rates:    provider,
 		client:   &http.Client{Timeout: 70 * time.Second},
 		log:      logger,
 		sessions: map[int64]session{},
 	}
+	if err := b.loadSessions(); err != nil {
+		b.log.Warn("load user settings failed", "error", err)
+	}
+	return b
 }
 
 func (b *Bot) Run(ctx context.Context) error {
+	if err := b.setBotCommands(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		b.log.Warn("set bot commands failed", "error", err)
+	}
+
 	var offset int64
 	for {
 		select {
@@ -75,6 +118,10 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update update) {
+	if update.CallbackQuery != nil {
+		b.handleCallbackQuery(ctx, *update.CallbackQuery)
+		return
+	}
 	if update.Message == nil || update.Message.From == nil {
 		return
 	}
@@ -103,6 +150,10 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		b.setCurrency(ctx, chatID, userID, text, true)
 	case isCommand(text, "/to"):
 		b.setCurrency(ctx, chatID, userID, text, false)
+	case isCommand(text, "/with"):
+		b.setWithCurrency(ctx, chatID, userID, text)
+	case isCommand(text, "/with_modify"):
+		b.setWithModify(ctx, chatID, userID, text)
 	case isCommand(text, "/multi"):
 		b.setMultiplier(ctx, chatID, userID, text)
 	case isCommand(text, "/modify_from"):
@@ -112,6 +163,45 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 	default:
 		b.convertMessage(ctx, chatID, userID, text)
 	}
+}
+
+func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
+	if query.From == nil {
+		return
+	}
+	userID := query.From.ID
+	if !b.cfg.IsAllowed(userID) {
+		b.log.Warn("blocked user callback", "user_id", userID)
+		_ = b.answerCallbackQuery(ctx, query.ID, "Нет доступа")
+		return
+	}
+	if query.Message == nil {
+		_ = b.answerCallbackQuery(ctx, query.ID, "Сообщение недоступно")
+		return
+	}
+
+	request, err := parseWithCallbackData(query.Data)
+	if err != nil {
+		_ = b.answerCallbackQuery(ctx, query.ID, "Кнопка устарела")
+		return
+	}
+
+	snapshot, err := b.rates.Get(ctx)
+	if err != nil {
+		b.log.Error("rates unavailable", "error", err)
+		_ = b.answerCallbackQuery(ctx, query.ID, "Курсы недоступны")
+		return
+	}
+
+	reply, err := conversionReply(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, snapshot)
+	if err != nil {
+		_ = b.answerCallbackQuery(ctx, query.ID, "Не удалось перевести")
+		_ = b.sendMessage(ctx, query.Message.Chat.ID, fmt.Sprintf("%s. Проверьте настройки.", err.Error()))
+		return
+	}
+
+	_ = b.answerCallbackQuery(ctx, query.ID, "")
+	_ = b.sendMessage(ctx, query.Message.Chat.ID, reply)
 }
 
 func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
@@ -144,6 +234,56 @@ func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string
 	}
 	b.setSession(userID, s)
 	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: %s -> %s", s.From, s.To))
+}
+
+func (b *Bot) setWithCurrency(ctx context.Context, chatID, userID int64, text string) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		_ = b.sendMessage(ctx, chatID, "Укажите валюты: /with USD EUR RUB. Для отключения используйте /with off.")
+		return
+	}
+
+	if len(fields) == 2 && isOffValue(fields[1]) {
+		s := b.getSession(userID)
+		s.With = nil
+		b.setSession(userID, s)
+		_ = b.sendMessage(ctx, chatID, "Готово: кнопки дополнительного перевода отключены.")
+		return
+	}
+
+	codes, err := parseCurrencyList(fields[1:])
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, err.Error())
+		return
+	}
+
+	s := b.getSession(userID)
+	s.With = codes
+	b.setSession(userID, s)
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: в ответах будут кнопки: %s.", strings.Join(codes, ", ")))
+}
+
+func (b *Bot) setWithModify(ctx context.Context, chatID, userID int64, text string) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		_ = b.sendMessage(ctx, chatID, "Укажите yes или no: /with_modify yes.")
+		return
+	}
+
+	value, err := parseYesNo(fields[1])
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, "Значение должно быть yes или no.")
+		return
+	}
+
+	s := b.getSession(userID)
+	s.WithModify = value
+	b.setSession(userID, s)
+	if value {
+		_ = b.sendMessage(ctx, chatID, "Готово: кнопки /with будут учитывать modify_from и modify_to.")
+		return
+	}
+	_ = b.sendMessage(ctx, chatID, "Готово: кнопки /with не будут учитывать modify_from и modify_to.")
 }
 
 func (b *Bot) setMultiplier(ctx context.Context, chatID, userID int64, text string) {
@@ -223,46 +363,22 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		return
 	}
 
-	multipliedAmount := amount * s.Multiplier
-	effectiveAmount := applyPercent(multipliedAmount, s.ModifyFromPercent)
-	baseResult, err := rates.Convert(effectiveAmount, s.From, s.To, snapshot)
+	reply, err := conversionReply(amount, amountCount, s.From, s.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, snapshot)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте /from и /to.", err.Error()))
 		return
 	}
-	result := applyPercent(baseResult, s.ModifyToPercent)
 
-	unitRate, err := rates.Convert(1, s.From, s.To, snapshot)
-	if err != nil {
-		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте /from и /to.", err.Error()))
-		return
+	var markup *inlineKeyboardMarkup
+	if len(s.With) > 0 {
+		markup = withReplyMarkup(amount, s)
 	}
-	unitRate = applyPercent(applyPercent(unitRate*s.Multiplier, s.ModifyFromPercent), s.ModifyToPercent)
-
-	amountText := formatAmountWithSettings(amount, multipliedAmount, effectiveAmount, s.From)
-	replyPrefix := fmt.Sprintf("%s = %s %s", amountText, convert.FormatMoney(result), s.To)
-	if amountCount > 1 {
-		replyPrefix = fmt.Sprintf("Итого: %s = %s %s\nСтрок учтено: %d", amountText, convert.FormatMoney(result), s.To, amountCount)
-	}
-
-	unitLabel := fmt.Sprintf("Курс: 1 %s", s.From)
-	if hasInputSettings(s) {
-		unitLabel = "Расчет для 1 введенной единицы"
-	}
-
-	reply := fmt.Sprintf(
-		"%s\n%s = %s %s",
-		replyPrefix,
-		unitLabel,
-		convert.FormatMoney(unitRate),
-		s.To,
-	)
-	_ = b.sendMessage(ctx, chatID, reply)
+	_ = b.sendMessageWithMarkup(ctx, chatID, reply, markup)
 }
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/multi 1000 - умножать входную сумму перед расчетом\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nПосле выбора пары пришлите сумму, например: 12 345,67. Можно прислать несколько сумм, каждую с новой строки, я сложу их и переведу итог.", s.From, s.To)
+	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/multi 1000 - умножать входную сумму перед расчетом\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nПосле выбора пары пришлите сумму, например: 12 345,67. Можно прислать несколько сумм, каждую с новой строки, я сложу их и переведу итог.", s.From, s.To)
 }
 
 func (b *Bot) getSession(userID int64) session {
@@ -270,15 +386,21 @@ func (b *Bot) getSession(userID int64) session {
 	s, ok := b.sessions[userID]
 	b.mu.RUnlock()
 	if ok {
-		return normalizeSession(s)
+		return normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
 	}
 	return session{From: b.cfg.DefaultFrom, To: b.cfg.DefaultTo, Multiplier: 1}
 }
 
 func (b *Bot) setSession(userID int64, s session) {
+	s = normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
 	b.mu.Lock()
-	b.sessions[userID] = normalizeSession(s)
+	b.sessions[userID] = s
+	snapshot := copySessions(b.sessions)
 	b.mu.Unlock()
+
+	if err := b.writeSessions(snapshot); err != nil {
+		b.log.Error("save user settings failed", "error", err)
+	}
 }
 
 func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
@@ -286,7 +408,7 @@ func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
 	err := b.post(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         60,
-		"allowed_updates": []string{"message"},
+		"allowed_updates": []string{"message", "callback_query"},
 	}, &result)
 	if err != nil {
 		return nil, err
@@ -298,16 +420,56 @@ func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
 }
 
 func (b *Bot) sendMessage(ctx context.Context, chatID int64, text string) error {
+	return b.sendMessageWithMarkup(ctx, chatID, text, nil)
+}
+
+func (b *Bot) sendMessageWithMarkup(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup) error {
 	var result apiResponse
-	err := b.post(ctx, "sendMessage", map[string]any{
+	payload := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
-	}, &result)
+	}
+	if markup != nil {
+		payload["reply_markup"] = markup
+	}
+	err := b.post(ctx, "sendMessage", payload, &result)
 	if err != nil {
 		return err
 	}
 	if !result.OK {
 		return fmt.Errorf("telegram sendMessage failed: %s", result.Description)
+	}
+	return nil
+}
+
+func (b *Bot) answerCallbackQuery(ctx context.Context, callbackQueryID, text string) error {
+	var result apiResponse
+	payload := map[string]any{
+		"callback_query_id": callbackQueryID,
+	}
+	if text != "" {
+		payload["text"] = text
+	}
+	err := b.post(ctx, "answerCallbackQuery", payload, &result)
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram answerCallbackQuery failed: %s", result.Description)
+	}
+	return nil
+}
+
+func (b *Bot) setBotCommands(ctx context.Context) error {
+	var result apiResponse
+	err := b.post(ctx, "setMyCommands", map[string]any{
+		"commands": botCommands(),
+	}, &result)
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram setMyCommands failed: %s", result.Description)
 	}
 	return nil
 }
@@ -374,8 +536,90 @@ func parseMultiplier(raw string) (float64, error) {
 	return value, nil
 }
 
+func parseYesNo(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "yes", "y", "true", "1", "да":
+		return true, nil
+	case "no", "n", "false", "0", "нет":
+		return false, nil
+	default:
+		return false, errors.New("invalid yes/no")
+	}
+}
+
+func parseCurrencyList(raw []string) ([]string, error) {
+	codes := make([]string, 0, len(raw))
+	seen := map[string]struct{}{}
+	for _, part := range raw {
+		code := strings.ToUpper(strings.TrimSpace(part))
+		code = strings.TrimPrefix(code, "/")
+		if code == "" {
+			continue
+		}
+		if len(code) != 3 {
+			return nil, errors.New("Код валюты должен быть трехбуквенным, например USD, EUR или RUB.")
+		}
+		if !isSupportedCurrency(code) {
+			return nil, errors.New("Такой валюты нет в списке бота. Посмотрите доступные варианты через /list.")
+		}
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+		codes = append(codes, code)
+	}
+	if len(codes) == 0 {
+		return nil, errors.New("Укажите хотя бы одну валюту: /with USD EUR RUB.")
+	}
+	return codes, nil
+}
+
 func applyPercent(value, percent float64) float64 {
 	return value * (1 + percent/100)
+}
+
+func conversionReply(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, snapshot rates.Snapshot) (string, error) {
+	multipliedAmount := amount * multiplier
+	effectiveAmount := multipliedAmount
+	if useModify {
+		effectiveAmount = applyPercent(multipliedAmount, modifyFromPercent)
+	}
+	baseResult, err := rates.Convert(effectiveAmount, from, to, snapshot)
+	if err != nil {
+		return "", err
+	}
+	result := baseResult
+	if useModify {
+		result = applyPercent(baseResult, modifyToPercent)
+	}
+
+	unitRate, err := rates.Convert(1, from, to, snapshot)
+	if err != nil {
+		return "", err
+	}
+	unitRate *= multiplier
+	if useModify {
+		unitRate = applyPercent(applyPercent(unitRate, modifyFromPercent), modifyToPercent)
+	}
+
+	amountText := formatAmountWithSettings(amount, multipliedAmount, effectiveAmount, from)
+	replyPrefix := fmt.Sprintf("%s = %s %s", amountText, convert.FormatMoney(result), to)
+	if amountCount > 1 {
+		replyPrefix = fmt.Sprintf("Итого: %s = %s %s\nСтрок учтено: %d", amountText, convert.FormatMoney(result), to, amountCount)
+	}
+
+	unitLabel := fmt.Sprintf("Курс: 1 %s", from)
+	if multiplier != 1 || (useModify && (modifyFromPercent != 0 || modifyToPercent != 0)) {
+		unitLabel = "Расчет для 1 введенной единицы"
+	}
+
+	return fmt.Sprintf(
+		"%s\n%s = %s %s",
+		replyPrefix,
+		unitLabel,
+		convert.FormatMoney(unitRate),
+		to,
+	), nil
 }
 
 func formatAmountWithSettings(amount, multipliedAmount, effectiveAmount float64, currency string) string {
@@ -391,7 +635,16 @@ func formatAmountWithSettings(amount, multipliedAmount, effectiveAmount float64,
 	return fmt.Sprintf("%s (%s -> %s) %s", convert.FormatMoney(amount), convert.FormatMoney(multipliedAmount), convert.FormatMoney(effectiveAmount), currency)
 }
 
-func normalizeSession(s session) session {
+func normalizeSession(s session, defaultFrom, defaultTo string) session {
+	if strings.TrimSpace(s.From) == "" {
+		s.From = defaultFrom
+	}
+	if strings.TrimSpace(s.To) == "" {
+		s.To = defaultTo
+	}
+	s.From = strings.ToUpper(strings.TrimSpace(s.From))
+	s.To = strings.ToUpper(strings.TrimSpace(s.To))
+	s.With = normalizeCurrencyList(s.With)
 	if s.Multiplier == 0 {
 		s.Multiplier = 1
 	}
@@ -399,7 +652,7 @@ func normalizeSession(s session) session {
 }
 
 func hasInputSettings(s session) bool {
-	s = normalizeSession(s)
+	s = normalizeSession(s, "", "")
 	return s.Multiplier != 1 || s.ModifyFromPercent != 0 || s.ModifyToPercent != 0
 }
 
@@ -409,18 +662,31 @@ func formatNumber(value float64) string {
 	return strings.TrimRight(formatted, ",")
 }
 
+func formatYesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
 func settingsText(s session, snapshot rates.Snapshot) string {
-	s = normalizeSession(s)
+	s = normalizeSession(s, "", "")
 	updatedAt := "нет данных"
 	if !snapshot.FetchedAt.IsZero() {
 		updatedAt = snapshot.FetchedAt.UTC().Format("2006-01-02 15:04:05 UTC")
 	}
+	with := "выключена"
+	if len(s.With) > 0 {
+		with = strings.Join(s.With, ", ")
+	}
 
 	return fmt.Sprintf(
-		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nМножитель входной суммы: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
+		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМножитель входной суммы: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
 		s.From,
 		s.To,
 		updatedAt,
+		with,
+		formatYesNo(s.WithModify),
 		formatNumber(s.Multiplier),
 		formatPercent(s.ModifyFromPercent),
 		formatPercent(s.ModifyToPercent),
@@ -435,6 +701,223 @@ func formatPercent(value float64) string {
 	return formatted + "%"
 }
 
+func withReplyMarkup(amount float64, s session) *inlineKeyboardMarkup {
+	buttons := make([]inlineKeyboardButton, 0, len(s.With))
+	for _, to := range s.With {
+		data, ok := withCallbackData(amount, s, to)
+		if !ok {
+			continue
+		}
+		buttons = append(buttons, inlineKeyboardButton{Text: "в " + to, CallbackData: data})
+	}
+	if len(buttons) == 0 {
+		return nil
+	}
+
+	return &inlineKeyboardMarkup{
+		InlineKeyboard: [][]inlineKeyboardButton{
+			buttons,
+		},
+	}
+}
+
+func withCallbackData(amount float64, s session, to string) (string, bool) {
+	parts := []string{
+		"w",
+		s.From,
+		to,
+		formatFloatForCallback(amount),
+		formatFloatForCallback(s.Multiplier),
+		"0",
+	}
+	if s.WithModify {
+		parts[5] = "1"
+		parts = append(parts, formatFloatForCallback(s.ModifyFromPercent), formatFloatForCallback(s.ModifyToPercent))
+	}
+	data := strings.Join(parts, "|")
+	return data, len(data) <= 64
+}
+
+type withCallbackRequest struct {
+	From              string
+	To                string
+	Amount            float64
+	Multiplier        float64
+	UseModify         bool
+	ModifyFromPercent float64
+	ModifyToPercent   float64
+}
+
+func parseWithCallbackData(data string) (withCallbackRequest, error) {
+	parts := strings.Split(data, "|")
+	if len(parts) != 6 && len(parts) != 8 {
+		return withCallbackRequest{}, errors.New("invalid callback data")
+	}
+	if parts[0] != "w" {
+		return withCallbackRequest{}, errors.New("invalid callback type")
+	}
+	from := strings.ToUpper(strings.TrimSpace(parts[1]))
+	to := strings.ToUpper(strings.TrimSpace(parts[2]))
+	if !isSupportedCurrency(from) || !isSupportedCurrency(to) {
+		return withCallbackRequest{}, errors.New("invalid callback currency")
+	}
+	amount, err := parseCallbackFloat(parts[3])
+	if err != nil {
+		return withCallbackRequest{}, err
+	}
+	multiplier, err := parseMultiplier(parts[4])
+	if err != nil {
+		return withCallbackRequest{}, err
+	}
+	useModify := parts[5] == "1"
+
+	request := withCallbackRequest{
+		From:       from,
+		To:         to,
+		Amount:     amount,
+		Multiplier: multiplier,
+		UseModify:  useModify,
+	}
+	if useModify {
+		if len(parts) != 8 {
+			return withCallbackRequest{}, errors.New("missing modifiers")
+		}
+		request.ModifyFromPercent, err = parseCallbackFloat(parts[6])
+		if err != nil {
+			return withCallbackRequest{}, err
+		}
+		request.ModifyToPercent, err = parseCallbackFloat(parts[7])
+		if err != nil {
+			return withCallbackRequest{}, err
+		}
+	}
+	return request, nil
+}
+
+func parseCallbackFloat(raw string) (float64, error) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, errors.New("invalid callback number")
+	}
+	return value, nil
+}
+
+func formatFloatForCallback(value float64) string {
+	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+func isOffValue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "off", "no", "none", "0", "-", "нет":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeCurrencyList(codes []string) []string {
+	if len(codes) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(codes))
+	seen := map[string]struct{}{}
+	for _, code := range codes {
+		code = strings.ToUpper(strings.TrimSpace(code))
+		if code == "" {
+			continue
+		}
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+		result = append(result, code)
+	}
+	return result
+}
+
+func (b *Bot) loadSessions() error {
+	if strings.TrimSpace(b.cfg.UserSettingsFile) == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(b.cfg.UserSettingsFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	var sessions map[int64]session
+	if err := json.Unmarshal(raw, &sessions); err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	for userID, s := range sessions {
+		b.sessions[userID] = normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
+	}
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *Bot) writeSessions(sessions map[int64]session) error {
+	if strings.TrimSpace(b.cfg.UserSettingsFile) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(b.cfg.UserSettingsFile), 0o755); err != nil {
+		return err
+	}
+
+	raw, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	tmpFile := b.cfg.UserSettingsFile + ".tmp"
+	if err := os.WriteFile(tmpFile, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpFile, b.cfg.UserSettingsFile)
+}
+
+func copySessions(sessions map[int64]session) map[int64]session {
+	result := make(map[int64]session, len(sessions))
+	for userID, s := range sessions {
+		result[userID] = s
+	}
+	return result
+}
+
+func botCommands() []botCommand {
+	return []botCommand{
+		{Command: "start", Description: "запустить бота"},
+		{Command: "help", Description: "справка по командам"},
+		{Command: "settings", Description: "текущие настройки"},
+		{Command: "from", Description: "выбрать исходную валюту"},
+		{Command: "to", Description: "выбрать валюту результата"},
+		{Command: "with", Description: "кнопки перевода в валюты"},
+		{Command: "with_modify", Description: "модификаторы для кнопок"},
+		{Command: "multi", Description: "множитель входной суммы"},
+		{Command: "modify_from", Description: "процент к входной сумме"},
+		{Command: "modify_to", Description: "процент к результату"},
+		{Command: "list", Description: "список валют"},
+	}
+}
+
+type botCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+type inlineKeyboardMarkup struct {
+	InlineKeyboard [][]inlineKeyboardButton `json:"inline_keyboard"`
+}
+
+type inlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
 type apiResponse struct {
 	OK          bool   `json:"ok"`
 	Description string `json:"description"`
@@ -447,8 +930,9 @@ type getUpdatesResponse struct {
 }
 
 type update struct {
-	UpdateID int64    `json:"update_id"`
-	Message  *message `json:"message"`
+	UpdateID      int64          `json:"update_id"`
+	Message       *message       `json:"message"`
+	CallbackQuery *callbackQuery `json:"callback_query"`
 }
 
 type message struct {
@@ -464,4 +948,11 @@ type user struct {
 
 type chat struct {
 	ID int64 `json:"id"`
+}
+
+type callbackQuery struct {
+	ID      string   `json:"id"`
+	From    *user    `json:"from"`
+	Message *message `json:"message"`
+	Data    string   `json:"data"`
 }

@@ -1,10 +1,16 @@
 package telegram
 
 import (
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"currency-converter-bot/internal/config"
 	"currency-converter-bot/internal/rates"
 )
 
@@ -63,6 +69,25 @@ func TestParseMultiplierRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestParseYesNo(t *testing.T) {
+	tests := map[string]bool{
+		"yes": true,
+		"no":  false,
+		"да":  true,
+		"нет": false,
+	}
+
+	for input, want := range tests {
+		got, err := parseYesNo(input)
+		if err != nil {
+			t.Fatalf("parseYesNo(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("parseYesNo(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
 func TestApplyPercent(t *testing.T) {
 	if got := applyPercent(1000, 50); got != 1500 {
 		t.Fatalf("applyPercent(1000, 50) = %v, want 1500", got)
@@ -92,10 +117,36 @@ func TestFormatAmountWithSettings(t *testing.T) {
 	}
 }
 
+func TestConversionReplyCanSkipModifiers(t *testing.T) {
+	snapshot := rates.Snapshot{Rates: map[string]rates.Rate{
+		"RUB": {Code: "RUB", Nominal: 1, Value: 1},
+		"UZS": {Code: "UZS", Nominal: 1, Value: 0.01},
+		"USD": {Code: "USD", Nominal: 1, Value: 100},
+	}}
+
+	withoutModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, false, snapshot)
+	if err != nil {
+		t.Fatalf("conversionReply without modifiers: %v", err)
+	}
+	if !strings.Contains(withoutModifiers, "10 000,00 UZS = 1,00 USD") {
+		t.Fatalf("conversionReply without modifiers = %q", withoutModifiers)
+	}
+
+	withModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, true, snapshot)
+	if err != nil {
+		t.Fatalf("conversionReply with modifiers: %v", err)
+	}
+	if !strings.Contains(withModifiers, "10 000,00 (15 000,00) UZS = 2,25 USD") {
+		t.Fatalf("conversionReply with modifiers = %q", withModifiers)
+	}
+}
+
 func TestSettingsText(t *testing.T) {
 	text := settingsText(session{
 		From:              "USD",
 		To:                "RUB",
+		With:              []string{"EUR", "USD"},
+		WithModify:        true,
 		Multiplier:        1000,
 		ModifyFromPercent: 1.5,
 		ModifyToPercent:   -2,
@@ -104,6 +155,8 @@ func TestSettingsText(t *testing.T) {
 	for _, want := range []string{
 		"Пара: USD -> RUB",
 		"Курсы обновлены: 2026-05-10 09:30:00 UTC",
+		"Кнопки перевода: EUR, USD",
+		"Модификаторы для кнопок: yes",
 		"Множитель входной суммы: 1 000",
 		"Модификатор входной суммы: +1,5%",
 		"Модификатор результата: -2%",
@@ -111,5 +164,132 @@ func TestSettingsText(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("settingsText() must contain %q, got:\n%s", want, text)
 		}
+	}
+}
+
+func TestBotCommands(t *testing.T) {
+	commands := botCommands()
+	got := map[string]bool{}
+	for _, command := range commands {
+		if command.Command == "" {
+			t.Fatal("command must not be empty")
+		}
+		if command.Description == "" {
+			t.Fatalf("description for %q must not be empty", command.Command)
+		}
+		got[command.Command] = true
+	}
+
+	for _, want := range []string{"start", "help", "settings", "from", "to", "with", "with_modify", "multi", "modify_from", "modify_to", "list"} {
+		if !got[want] {
+			t.Fatalf("botCommands() must contain %q", want)
+		}
+	}
+}
+
+func TestWithCallbackData(t *testing.T) {
+	data, ok := withCallbackData(10000, session{
+		From:              "UZS",
+		With:              []string{"USD"},
+		Multiplier:        1,
+		WithModify:        true,
+		ModifyFromPercent: 1.5,
+		ModifyToPercent:   -2,
+	}, "USD")
+	if !ok {
+		t.Fatal("withCallbackData() ok = false")
+	}
+
+	request, err := parseWithCallbackData(data)
+	if err != nil {
+		t.Fatalf("parseWithCallbackData(): %v", err)
+	}
+	if request.From != "UZS" || request.To != "USD" || request.Amount != 10000 || request.Multiplier != 1 || !request.UseModify || request.ModifyFromPercent != 1.5 || request.ModifyToPercent != -2 {
+		t.Fatalf("request = %+v", request)
+	}
+}
+
+func TestWithReplyMarkupCreatesMultipleButtons(t *testing.T) {
+	markup := withReplyMarkup(10000, session{
+		From:       "UZS",
+		With:       []string{"USD", "EUR", "RUB"},
+		Multiplier: 1,
+	})
+	if markup == nil {
+		t.Fatal("withReplyMarkup() = nil")
+	}
+	if len(markup.InlineKeyboard) != 1 {
+		t.Fatalf("rows = %d, want 1", len(markup.InlineKeyboard))
+	}
+	if len(markup.InlineKeyboard[0]) != 3 {
+		t.Fatalf("buttons = %d, want 3", len(markup.InlineKeyboard[0]))
+	}
+	for i, want := range []string{"в USD", "в EUR", "в RUB"} {
+		if markup.InlineKeyboard[0][i].Text != want {
+			t.Fatalf("button %d text = %q, want %q", i, markup.InlineKeyboard[0][i].Text, want)
+		}
+	}
+}
+
+func TestBotPersistsSessions(t *testing.T) {
+	settingsFile := filepath.Join(t.TempDir(), "user_settings.json")
+	cfg := config.Config{
+		DefaultFrom:      "USD",
+		DefaultTo:        "RUB",
+		UserSettingsFile: settingsFile,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	bot := New(cfg, nil, logger)
+	bot.setSession(42, session{
+		From:              "UZS",
+		To:                "RUB",
+		With:              []string{"USD", "EUR"},
+		WithModify:        true,
+		Multiplier:        1000,
+		ModifyFromPercent: 1.5,
+		ModifyToPercent:   -2,
+	})
+
+	raw, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", settingsFile, err)
+	}
+	if !strings.Contains(string(raw), `"multiplier": 1000`) {
+		t.Fatalf("settings file must contain multiplier, got:\n%s", string(raw))
+	}
+
+	restarted := New(cfg, nil, logger)
+	got := restarted.getSession(42)
+	want := session{
+		From:              "UZS",
+		To:                "RUB",
+		With:              []string{"USD", "EUR"},
+		WithModify:        true,
+		Multiplier:        1000,
+		ModifyFromPercent: 1.5,
+		ModifyToPercent:   -2,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("restored session = %+v, want %+v", got, want)
+	}
+}
+
+func TestBotLoadsLegacySingleWithCurrency(t *testing.T) {
+	settingsFile := filepath.Join(t.TempDir(), "user_settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"42":{"from":"UZS","to":"RUB","with":"USD","multiplier":1}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", settingsFile, err)
+	}
+	cfg := config.Config{
+		DefaultFrom:      "USD",
+		DefaultTo:        "RUB",
+		UserSettingsFile: settingsFile,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	bot := New(cfg, nil, logger)
+	got := bot.getSession(42)
+	if len(got.With) != 1 || got.With[0] != "USD" {
+		t.Fatalf("With = %#v, want [USD]", got.With)
 	}
 }
