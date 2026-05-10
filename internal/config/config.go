@@ -32,7 +32,7 @@ func Load(path string) (Config, error) {
 		DefaultTo:        upperOrDefault(os.Getenv("DEFAULT_TO"), "RUB"),
 		CacheFile:        valueOrDefault(os.Getenv("RATES_CACHE_FILE"), "data/rates_cache.json"),
 		UserSettingsFile: valueOrDefault(os.Getenv("USER_SETTINGS_FILE"), "data/user_settings.json"),
-		CBRDailyURL:      valueOrDefault(os.Getenv("CBR_DAILY_URL"), "https://www.cbr.ru/scripts/XML_daily.asp"),
+		CBRDailyURL:      valueOrDefault(os.Getenv("CBR_DAILY_URLS"), valueOrDefault(os.Getenv("CBR_DAILY_URL"), "https://www.cbr.ru/scripts/XML_daily.asp")),
 		TelegramAPI:      strings.TrimRight(valueOrDefault(os.Getenv("TELEGRAM_API_BASE"), "https://api.telegram.org"), "/"),
 	}
 

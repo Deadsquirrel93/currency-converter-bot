@@ -1,9 +1,13 @@
 package rates
 
 import (
+	"context"
 	"encoding/xml"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeCBRWindows1251XML(t *testing.T) {
@@ -30,5 +34,40 @@ func TestDecodeCBRWindows1251XML(t *testing.T) {
 	}
 	if parsed.Valutes[0].Name != "Доллар" {
 		t.Fatalf("Name = %q, want %q", parsed.Valutes[0].Name, "Доллар")
+	}
+}
+
+func TestProviderFallsBackToNextSourceURL(t *testing.T) {
+	failed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusBadGateway)
+	}))
+	defer failed.Close()
+
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<ValCurs>
+	<Valute>
+		<CharCode>USD</CharCode>
+		<Nominal>1</Nominal>
+		<Name>Доллар США</Name>
+		<Value>90,1234</Value>
+	</Valute>
+</ValCurs>`))
+	}))
+	defer ok.Close()
+
+	provider := NewProvider(failed.URL+","+ok.URL, t.TempDir()+"/rates.json", time.Hour)
+	provider.fetchRetries = 1
+
+	snapshot, err := provider.Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if snapshot.Source != ok.URL {
+		t.Fatalf("Source = %q, want %q", snapshot.Source, ok.URL)
+	}
+	if snapshot.Rates["USD"].Value != 90.1234 {
+		t.Fatalf("USD value = %v, want 90.1234", snapshot.Rates["USD"].Value)
 	}
 }

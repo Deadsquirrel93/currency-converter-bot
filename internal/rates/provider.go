@@ -27,18 +27,20 @@ type Snapshot struct {
 }
 
 type Provider struct {
-	client    *http.Client
-	sourceURL string
-	cacheFile string
-	cacheTTL  time.Duration
+	client       *http.Client
+	sourceURLs   []string
+	cacheFile    string
+	cacheTTL     time.Duration
+	fetchRetries int
 }
 
 func NewProvider(sourceURL, cacheFile string, cacheTTL time.Duration) *Provider {
 	return &Provider{
-		client:    &http.Client{Timeout: 15 * time.Second},
-		sourceURL: sourceURL,
-		cacheFile: cacheFile,
-		cacheTTL:  cacheTTL,
+		client:       &http.Client{Timeout: 15 * time.Second},
+		sourceURLs:   parseSourceURLs(sourceURL),
+		cacheFile:    cacheFile,
+		cacheTTL:     cacheTTL,
+		fetchRetries: 3,
 	}
 }
 
@@ -47,7 +49,7 @@ func (p *Provider) Get(ctx context.Context) (Snapshot, error) {
 		return cached, nil
 	}
 
-	snapshot, err := p.fetchCBR(ctx)
+	snapshot, err := p.fetchAnyCBR(ctx)
 	if err == nil {
 		_ = p.writeCache(snapshot)
 		return snapshot, nil
@@ -111,8 +113,26 @@ func (p *Provider) writeCache(snapshot Snapshot) error {
 	return os.WriteFile(p.cacheFile, raw, 0o644)
 }
 
-func (p *Provider) fetchCBR(ctx context.Context) (Snapshot, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.sourceURL, nil)
+func (p *Provider) fetchAnyCBR(ctx context.Context) (Snapshot, error) {
+	var failures []string
+	for _, sourceURL := range p.sourceURLs {
+		for attempt := 1; attempt <= p.fetchRetries; attempt++ {
+			snapshot, err := p.fetchCBR(ctx, sourceURL)
+			if err == nil {
+				return snapshot, nil
+			}
+			failures = append(failures, fmt.Sprintf("%s attempt %d: %v", sourceURL, attempt, err))
+			if errorsIsContext(ctx.Err()) {
+				return Snapshot{}, ctx.Err()
+			}
+			sleepBeforeRetry(ctx, attempt)
+		}
+	}
+	return Snapshot{}, fmt.Errorf("all CBR sources failed: %s", strings.Join(failures, "; "))
+}
+
+func (p *Provider) fetchCBR(ctx context.Context, sourceURL string) (Snapshot, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -152,9 +172,39 @@ func (p *Provider) fetchCBR(ctx context.Context) (Snapshot, error) {
 
 	return Snapshot{
 		FetchedAt: time.Now().UTC(),
-		Source:    p.sourceURL,
+		Source:    sourceURL,
 		Rates:     rates,
 	}, nil
+}
+
+func parseSourceURLs(raw string) []string {
+	var result []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	if len(result) == 0 {
+		return []string{"https://www.cbr.ru/scripts/XML_daily.asp"}
+	}
+	return result
+}
+
+func errorsIsContext(err error) bool {
+	return err == context.Canceled || err == context.DeadlineExceeded
+}
+
+func sleepBeforeRetry(ctx context.Context, attempt int) {
+	if attempt <= 0 {
+		return
+	}
+	timer := time.NewTimer(time.Duration(attempt) * 300 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
 
 type cbrValCurs struct {

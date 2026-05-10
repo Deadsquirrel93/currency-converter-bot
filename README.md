@@ -30,6 +30,7 @@ TELEGRAM_ALLOWED_USER_IDS=111111111,222222222
 DEFAULT_FROM=USD
 DEFAULT_TO=RUB
 USER_SETTINGS_FILE=data/user_settings.json
+CBR_DAILY_URLS=https://www.cbr.ru/scripts/XML_daily.asp
 ```
 
 3. Запустите:
@@ -77,3 +78,11 @@ docker compose up -d --build
 `/modify_from 1.5` меняет входную сумму перед конвертацией. Например, с `/modify_from 50` сумма `100 USD` сначала станет `150 USD`, а потом будет пересчитана в итоговую валюту. Для сброса используйте `0`.
 
 Поддерживается `RUB` как базовая валюта, а остальные валюты берутся из ежедневных данных ЦБ РФ.
+
+Если ЦБ РФ иногда сбрасывает соединение, можно указать несколько XML-совместимых источников через запятую:
+
+```dotenv
+CBR_DAILY_URLS=https://www.cbr.ru/scripts/XML_daily.asp,https://cbr.ru/scripts/XML_daily.asp
+```
+
+Бот попробует каждый источник несколько раз и сохранит успешный ответ в кеш.
