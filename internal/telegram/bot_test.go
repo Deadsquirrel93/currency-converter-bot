@@ -197,31 +197,86 @@ func TestConversionReplyCanSkipModifiers(t *testing.T) {
 		"USD": {Code: "USD", Nominal: 1, Value: 100},
 	}}
 
-	withoutModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, false, snapshot)
+	withoutModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, false, "", snapshot)
 	if err != nil {
 		t.Fatalf("conversionReply without modifiers: %v", err)
 	}
 	for _, want := range []string{
 		"10 000,00 UZS = <b>1,00 USD</b>",
 		"Курс: 1 UZS = 0,0001 USD",
+		"100 UZS = 0,01 USD",
 	} {
 		if !strings.Contains(withoutModifiers, want) {
 			t.Fatalf("conversionReply without modifiers must contain %q, got %q", want, withoutModifiers)
 		}
 	}
 
-	withModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, true, snapshot)
+	withModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, true, "", snapshot)
 	if err != nil {
 		t.Fatalf("conversionReply with modifiers: %v", err)
 	}
 	for _, want := range []string{
 		"10 000,00 (15 000,00) UZS = <b>2,25 USD</b>",
 		"Курс: 1 UZS = 0,0001 USD",
-		"Расчет для 1 введенной единицы = 0,00 USD",
+		"100 UZS = 0,01 USD",
+		"Расчет для 1 введенной единицы = 0,000225 USD",
 	} {
 		if !strings.Contains(withModifiers, want) {
 			t.Fatalf("conversionReply with modifiers must contain %q, got %q", want, withModifiers)
 		}
+	}
+}
+
+func TestFormatConvertedAmountKeepsTinyValuesReadable(t *testing.T) {
+	if got := formatConvertedAmount(0.000225); got != "0,000225" {
+		t.Fatalf("formatConvertedAmount() = %q, want 0,000225", got)
+	}
+	if got := formatConvertedAmount(12.3); got != "12,30" {
+		t.Fatalf("formatConvertedAmount() = %q, want 12,30", got)
+	}
+}
+
+func TestFormatConvertedAmountUsesRoundMode(t *testing.T) {
+	tests := map[string]string{
+		"0": "12",
+		"2": "12,35",
+		"4": "12,3457",
+		"6": "12,345679",
+	}
+
+	for mode, want := range tests {
+		got := formatConvertedAmountForMode(12.3456789, mode)
+		if got != want {
+			t.Fatalf("formatConvertedAmountForMode(%q) = %q, want %q", mode, got, want)
+		}
+	}
+
+	if got := formatConvertedAmountForMode(0.000225, "2"); got != "0,00" {
+		t.Fatalf("formatConvertedAmountForMode tiny with round 2 = %q, want 0,00", got)
+	}
+}
+
+func TestParseRoundMode(t *testing.T) {
+	for _, input := range []string{"auto", "AUTO", "0", "2", "4", "6"} {
+		if _, err := parseRoundMode(input); err != nil {
+			t.Fatalf("parseRoundMode(%q): %v", input, err)
+		}
+	}
+	if _, err := parseRoundMode("3"); err == nil {
+		t.Fatal("parseRoundMode(3) error = nil, want error")
+	}
+}
+
+func TestInlineConversionResultUsesHTMLMessage(t *testing.T) {
+	result := inlineConversionResult("100,00 USD = <b>9 000,00 RUB</b>\nКурс: 1 USD = 90,00 RUB")
+	if result.Type != "article" || result.ID == "" {
+		t.Fatalf("inline result = %+v", result)
+	}
+	if result.Title != "100,00 USD = 9 000,00 RUB" {
+		t.Fatalf("Title = %q", result.Title)
+	}
+	if result.InputMessageContent.MessageText == "" || result.InputMessageContent.ParseMode != "HTML" {
+		t.Fatalf("InputMessageContent = %+v", result.InputMessageContent)
 	}
 }
 
@@ -256,6 +311,7 @@ func TestSettingsText(t *testing.T) {
 		With:              []string{"EUR", "USD"},
 		WithModify:        true,
 		Multiplier:        1000,
+		Round:             "4",
 		ModifyFromPercent: 1.5,
 		ModifyToPercent:   -2,
 	}, rates.Snapshot{FetchedAt: time.Date(2026, 5, 10, 9, 30, 0, 0, time.UTC)})
@@ -266,6 +322,7 @@ func TestSettingsText(t *testing.T) {
 		"Кнопки перевода: EUR, USD",
 		"Модификаторы для кнопок: yes",
 		"Множитель входной суммы: 1 000",
+		"Округление результата: 4",
 		"Модификатор входной суммы: +1,5%",
 		"Модификатор результата: -2%",
 	} {
@@ -288,7 +345,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "settings", "from", "to", "rate", "with", "with_modify", "multi", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "settings", "from", "to", "swap", "rate", "reset", "delete", "with", "with_modify", "multi", "round", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
@@ -355,6 +412,7 @@ func TestBotPersistsSessions(t *testing.T) {
 		With:              []string{"USD", "EUR"},
 		WithModify:        true,
 		Multiplier:        1000,
+		Round:             "4",
 		ModifyFromPercent: 1.5,
 		ModifyToPercent:   -2,
 	})
@@ -366,6 +424,9 @@ func TestBotPersistsSessions(t *testing.T) {
 	if !strings.Contains(string(raw), `"multiplier": 1000`) {
 		t.Fatalf("settings file must contain multiplier, got:\n%s", string(raw))
 	}
+	if !strings.Contains(string(raw), `"round": "4"`) {
+		t.Fatalf("settings file must contain round, got:\n%s", string(raw))
+	}
 
 	restarted := New(cfg, nil, logger)
 	got := restarted.getSession(42)
@@ -375,11 +436,85 @@ func TestBotPersistsSessions(t *testing.T) {
 		With:              []string{"USD", "EUR"},
 		WithModify:        true,
 		Multiplier:        1000,
+		Round:             "4",
 		ModifyFromPercent: 1.5,
 		ModifyToPercent:   -2,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("restored session = %+v, want %+v", got, want)
+	}
+}
+
+func TestBotResetsSessionToDefaults(t *testing.T) {
+	settingsFile := filepath.Join(t.TempDir(), "user_settings.json")
+	cfg := config.Config{
+		DefaultFrom:      "USD",
+		DefaultTo:        "RUB",
+		UserSettingsFile: settingsFile,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	bot := New(cfg, nil, logger)
+	bot.setSession(42, session{
+		From:              "UZS",
+		To:                "EUR",
+		With:              []string{"USD"},
+		WithModify:        true,
+		Multiplier:        1000,
+		Round:             "4",
+		ModifyFromPercent: 1.5,
+		ModifyToPercent:   -2,
+	})
+	bot.setSession(42, defaultSession(cfg.DefaultFrom, cfg.DefaultTo))
+
+	got := bot.getSession(42)
+	want := session{From: "USD", To: "RUB", Multiplier: 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reset session = %+v, want %+v", got, want)
+	}
+
+	raw, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", settingsFile, err)
+	}
+	for _, unwanted := range []string{`"with"`, `"round"`, `"modify_from_percent": 1.5`, `"modify_to_percent": -2`, `"multiplier": 1000`} {
+		if strings.Contains(string(raw), unwanted) {
+			t.Fatalf("settings file must not contain %q after reset, got:\n%s", unwanted, string(raw))
+		}
+	}
+}
+
+func TestBotDeletesSession(t *testing.T) {
+	settingsFile := filepath.Join(t.TempDir(), "user_settings.json")
+	cfg := config.Config{
+		DefaultFrom:      "USD",
+		DefaultTo:        "RUB",
+		UserSettingsFile: settingsFile,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	bot := New(cfg, nil, logger)
+	bot.setSession(42, session{From: "UZS", To: "EUR", Multiplier: 1000})
+	bot.deleteSession(42)
+
+	got := bot.getSession(42)
+	want := session{From: "USD", To: "RUB", Multiplier: 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("session after delete = %+v, want default %+v", got, want)
+	}
+
+	raw, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", settingsFile, err)
+	}
+	if strings.Contains(string(raw), `"42"`) {
+		t.Fatalf("settings file must not contain deleted user, got:\n%s", string(raw))
+	}
+
+	restarted := New(cfg, nil, logger)
+	got = restarted.getSession(42)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("restored session after delete = %+v, want default %+v", got, want)
 	}
 }
 

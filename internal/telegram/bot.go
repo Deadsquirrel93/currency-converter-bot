@@ -37,6 +37,7 @@ type session struct {
 	With              []string `json:"with,omitempty"`
 	WithModify        bool     `json:"with_modify"`
 	Multiplier        float64  `json:"multiplier"`
+	Round             string   `json:"round,omitempty"`
 	ModifyFromPercent float64  `json:"modify_from_percent"`
 	ModifyToPercent   float64  `json:"modify_to_percent"`
 }
@@ -119,6 +120,10 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update update) {
+	if update.InlineQuery != nil {
+		b.handleInlineQuery(ctx, *update.InlineQuery)
+		return
+	}
 	if update.CallbackQuery != nil {
 		b.handleCallbackQuery(ctx, *update.CallbackQuery)
 		return
@@ -149,6 +154,12 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		b.showSettings(ctx, chatID, userID)
 	case isCommand(text, "/rate"):
 		b.showRate(ctx, chatID, userID, text)
+	case isCommand(text, "/swap"):
+		b.swapCurrencies(ctx, chatID, userID)
+	case isCommand(text, "/reset"):
+		b.resetSettings(ctx, chatID, userID)
+	case isCommand(text, "/delete"):
+		b.deleteSettings(ctx, chatID, userID)
 	case isCommand(text, "/from"):
 		b.setCurrency(ctx, chatID, userID, text, true)
 	case isCommand(text, "/to"):
@@ -159,6 +170,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		b.setWithModify(ctx, chatID, userID, text)
 	case isCommand(text, "/multi"):
 		b.setMultiplier(ctx, chatID, userID, text)
+	case isCommand(text, "/round"):
+		b.setRound(ctx, chatID, userID, text)
 	case isCommand(text, "/modify_from"):
 		b.setModifier(ctx, chatID, userID, text, true)
 	case isCommand(text, "/modify_to"):
@@ -196,7 +209,8 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 		return
 	}
 
-	reply, err := conversionReply(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, snapshot)
+	s := b.getSession(userID)
+	reply, err := conversionReply(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, s.Round, snapshot)
 	if err != nil {
 		_ = b.answerCallbackQuery(ctx, query.ID, "Не удалось перевести")
 		_ = b.sendMessage(ctx, query.Message.Chat.ID, fmt.Sprintf("%s. Проверьте настройки.", err.Error()))
@@ -205,6 +219,48 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 
 	_ = b.answerCallbackQuery(ctx, query.ID, "")
 	_ = b.sendHTMLMessage(ctx, query.Message.Chat.ID, reply)
+}
+
+func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
+	if query.From == nil {
+		return
+	}
+	userID := query.From.ID
+	if !b.cfg.IsAllowed(userID) {
+		b.log.Warn("blocked user inline query", "user_id", userID)
+		_ = b.answerInlineQuery(ctx, query.ID, nil)
+		return
+	}
+
+	text := strings.TrimSpace(query.Query)
+	if text == "" {
+		_ = b.answerInlineQuery(ctx, query.ID, nil)
+		return
+	}
+
+	s := b.getSession(userID)
+	request, err := parseConversionInput(text, s)
+	if err != nil {
+		_ = b.answerInlineQuery(ctx, query.ID, nil)
+		return
+	}
+
+	snapshot, err := b.rates.Get(ctx)
+	if err != nil {
+		b.log.Error("rates unavailable", "error", err)
+		_ = b.answerInlineQuery(ctx, query.ID, nil)
+		return
+	}
+
+	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, s.Round, snapshot)
+	if err != nil {
+		_ = b.answerInlineQuery(ctx, query.ID, nil)
+		return
+	}
+
+	_ = b.answerInlineQuery(ctx, query.ID, []inlineQueryResultArticle{
+		inlineConversionResult(reply),
+	})
 }
 
 func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
@@ -303,6 +359,25 @@ func (b *Bot) setMultiplier(ctx context.Context, chatID, userID int64, text stri
 	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: входная сумма будет умножаться на %s.", formatNumber(multiplier)))
 }
 
+func (b *Bot) setRound(ctx context.Context, chatID, userID int64, text string) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		_ = b.sendMessage(ctx, chatID, "Укажите округление: /round auto, /round 0, /round 2, /round 4 или /round 6.")
+		return
+	}
+
+	round, err := parseRoundMode(fields[1])
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, "Округление должно быть auto, 0, 2, 4 или 6.")
+		return
+	}
+
+	s := b.getSession(userID)
+	s.Round = round
+	b.setSession(userID, s)
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: округление результата - %s.", formatRoundMode(round)))
+}
+
 func (b *Bot) setModifier(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
 	fields := strings.Fields(text)
 	command := "/modify_to"
@@ -346,6 +421,24 @@ func (b *Bot) showSettings(ctx context.Context, chatID, userID int64) {
 	_ = b.sendMessage(ctx, chatID, settingsText(s, snapshot))
 }
 
+func (b *Bot) resetSettings(ctx context.Context, chatID, userID int64) {
+	s := defaultSession(b.cfg.DefaultFrom, b.cfg.DefaultTo)
+	b.setSession(userID, s)
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Настройки сброшены: %s -> %s.", s.From, s.To))
+}
+
+func (b *Bot) swapCurrencies(ctx context.Context, chatID, userID int64) {
+	s := b.getSession(userID)
+	s.From, s.To = s.To, s.From
+	b.setSession(userID, s)
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: %s -> %s", s.From, s.To))
+}
+
+func (b *Bot) deleteSettings(ctx context.Context, chatID, userID int64) {
+	b.deleteSession(userID)
+	_ = b.sendMessage(ctx, chatID, "Ваши сохраненные настройки удалены. При следующем сообщении будут использоваться настройки по умолчанию.")
+}
+
 func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 	s := b.getSession(userID)
 	request, err := parseRateRequest(text, s)
@@ -384,7 +477,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		return
 	}
 
-	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, snapshot)
+	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, s.Round, snapshot)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте валюты.", err.Error()))
 		return
@@ -401,7 +494,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/rate USD RUB - показать текущий курс пары\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/multi 1000 - умножать входную сумму перед расчетом\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Несколько сумм с новой строки я сложу и переведу итог.", s.From, s.To)
+	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если whitelist пустой, я доступен всем; если задан, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub.", s.From, s.To)
 }
 
 func (b *Bot) getSession(userID int64) session {
@@ -411,7 +504,7 @@ func (b *Bot) getSession(userID int64) session {
 	if ok {
 		return normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
 	}
-	return session{From: b.cfg.DefaultFrom, To: b.cfg.DefaultTo, Multiplier: 1}
+	return defaultSession(b.cfg.DefaultFrom, b.cfg.DefaultTo)
 }
 
 func (b *Bot) setSession(userID int64, s session) {
@@ -426,12 +519,23 @@ func (b *Bot) setSession(userID int64, s session) {
 	}
 }
 
+func (b *Bot) deleteSession(userID int64) {
+	b.mu.Lock()
+	delete(b.sessions, userID)
+	snapshot := copySessions(b.sessions)
+	b.mu.Unlock()
+
+	if err := b.writeSessions(snapshot); err != nil {
+		b.log.Error("delete user settings failed", "path", b.cfg.UserSettingsFile, "error", err)
+	}
+}
+
 func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
 	var result getUpdatesResponse
 	err := b.post(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         60,
-		"allowed_updates": []string{"message", "callback_query"},
+		"allowed_updates": []string{"message", "callback_query", "inline_query"},
 	}, &result)
 	if err != nil {
 		return nil, err
@@ -494,6 +598,26 @@ func (b *Bot) answerCallbackQuery(ctx context.Context, callbackQueryID, text str
 	}
 	if !result.OK {
 		return fmt.Errorf("telegram answerCallbackQuery failed: %s", result.Description)
+	}
+	return nil
+}
+
+func (b *Bot) answerInlineQuery(ctx context.Context, inlineQueryID string, results []inlineQueryResultArticle) error {
+	if results == nil {
+		results = []inlineQueryResultArticle{}
+	}
+	var result apiResponse
+	err := b.post(ctx, "answerInlineQuery", map[string]any{
+		"inline_query_id": inlineQueryID,
+		"results":         results,
+		"cache_time":      0,
+		"is_personal":     true,
+	}, &result)
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram answerInlineQuery failed: %s", result.Description)
 	}
 	return nil
 }
@@ -580,6 +704,32 @@ func parseMultiplier(raw string) (float64, error) {
 		return 0, errors.New("invalid multiplier")
 	}
 	return value, nil
+}
+
+func parseRoundMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "auto", "default", "по", "авто":
+		return "", nil
+	case "0", "2", "4", "6":
+		return strings.TrimSpace(raw), nil
+	default:
+		return "", errors.New("invalid round mode")
+	}
+}
+
+func roundPrecision(roundMode string) (int, bool) {
+	switch roundMode {
+	case "0":
+		return 0, true
+	case "2":
+		return 2, true
+	case "4":
+		return 4, true
+	case "6":
+		return 6, true
+	default:
+		return 0, false
+	}
 }
 
 func parseYesNo(raw string) (bool, error) {
@@ -692,13 +842,15 @@ func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
 	}
 
 	return fmt.Sprintf(
-		"Курс:\n1 %s = %s %s\n1 %s = %s %s\nОбновлено: %s",
+		"Курс:\n1 %s = %s %s%s\n1 %s = %s %s%s\nОбновлено: %s",
 		from,
 		formatRate(direct),
 		to,
+		convenientRateSuffix(from, to, direct),
 		to,
 		formatRate(reverse),
 		from,
+		convenientRateSuffix(to, from, reverse),
 		updatedAt,
 	), nil
 }
@@ -707,7 +859,66 @@ func formatRate(value float64) string {
 	if math.Abs(value) >= 1 {
 		return convert.FormatMoney(value)
 	}
-	formatted := strconv.FormatFloat(value, 'f', 6, 64)
+	return formatSmallDecimal(value, 8)
+}
+
+func formatConvertedAmount(value float64) string {
+	if value == 0 || math.Abs(value) >= 0.01 {
+		return convert.FormatMoney(value)
+	}
+	return formatSmallDecimal(value, 8)
+}
+
+func formatConvertedAmountForMode(value float64, roundMode string) string {
+	precision, ok := roundPrecision(roundMode)
+	if !ok {
+		return formatConvertedAmount(value)
+	}
+	return formatFixedDecimal(value, precision)
+}
+
+func formatFixedDecimal(value float64, precision int) string {
+	if precision <= 0 {
+		return groupWholeNumber(value)
+	}
+	formatted := strconv.FormatFloat(value, 'f', precision, 64)
+	whole, fraction, ok := strings.Cut(formatted, ".")
+	if !ok {
+		return groupDigits(whole)
+	}
+	return groupDigits(whole) + "," + fraction
+}
+
+func groupWholeNumber(value float64) string {
+	rounded := math.Round(value)
+	return groupDigits(strconv.FormatInt(int64(rounded), 10))
+}
+
+func groupDigits(raw string) string {
+	sign := ""
+	if strings.HasPrefix(raw, "-") {
+		sign = "-"
+		raw = strings.TrimPrefix(raw, "-")
+	}
+	if len(raw) <= 3 {
+		return sign + raw
+	}
+	var b strings.Builder
+	firstGroup := len(raw) % 3
+	if firstGroup == 0 {
+		firstGroup = 3
+	}
+	b.WriteString(sign)
+	b.WriteString(raw[:firstGroup])
+	for i := firstGroup; i < len(raw); i += 3 {
+		b.WriteByte(' ')
+		b.WriteString(raw[i : i+3])
+	}
+	return b.String()
+}
+
+func formatSmallDecimal(value float64, precision int) string {
+	formatted := strconv.FormatFloat(value, 'f', precision, 64)
 	formatted = strings.TrimRight(formatted, "0")
 	formatted = strings.TrimRight(formatted, ".")
 	if formatted == "" || formatted == "-0" {
@@ -716,7 +927,28 @@ func formatRate(value float64) string {
 	return strings.ReplaceAll(formatted, ".", ",")
 }
 
-func conversionReply(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, snapshot rates.Snapshot) (string, error) {
+func convenientRateSuffix(from, to string, unitRate float64) string {
+	nominal, ok := convenientRateNominal(unitRate)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("\n%s %s = %s %s", formatNumber(float64(nominal)), from, formatConvertedAmount(unitRate*float64(nominal)), to)
+}
+
+func convenientRateNominal(unitRate float64) (int, bool) {
+	absRate := math.Abs(unitRate)
+	if absRate == 0 || absRate >= 0.01 {
+		return 0, false
+	}
+	for _, nominal := range []int{10, 100, 1000, 10000, 100000, 1000000} {
+		if absRate*float64(nominal) >= 0.01 {
+			return nominal, true
+		}
+	}
+	return 1000000, true
+}
+
+func conversionReply(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, roundMode string, snapshot rates.Snapshot) (string, error) {
 	multipliedAmount := amount * multiplier
 	effectiveAmount := multipliedAmount
 	if useModify {
@@ -742,7 +974,7 @@ func conversionReply(amount float64, amountCount int, from, to string, multiplie
 	}
 
 	amountText := formatAmountWithSettings(amount, multipliedAmount, effectiveAmount, from)
-	resultText := fmt.Sprintf("%s %s", convert.FormatMoney(result), to)
+	resultText := fmt.Sprintf("%s %s", formatConvertedAmountForMode(result, roundMode), to)
 	replyPrefix := fmt.Sprintf("%s = <b>%s</b>", html.EscapeString(amountText), html.EscapeString(resultText))
 	if amountCount > 1 {
 		replyPrefix = fmt.Sprintf("Итого: %s = <b>%s</b>\nСтрок учтено: %d", html.EscapeString(amountText), html.EscapeString(resultText), amountCount)
@@ -752,8 +984,11 @@ func conversionReply(amount float64, amountCount int, from, to string, multiplie
 		replyPrefix,
 		fmt.Sprintf("Курс: 1 %s = %s %s", html.EscapeString(from), html.EscapeString(formatRate(rawUnitRate)), html.EscapeString(to)),
 	}
+	if suffix := convenientRateSuffix(from, to, rawUnitRate); suffix != "" {
+		lines = append(lines, html.EscapeString(strings.TrimPrefix(suffix, "\n")))
+	}
 	if multiplier != 1 || (useModify && (modifyFromPercent != 0 || modifyToPercent != 0)) {
-		lines = append(lines, fmt.Sprintf("Расчет для 1 введенной единицы = %s %s", html.EscapeString(convert.FormatMoney(unitRate)), html.EscapeString(to)))
+		lines = append(lines, fmt.Sprintf("Расчет для 1 введенной единицы = %s %s", html.EscapeString(formatConvertedAmountForMode(unitRate, roundMode)), html.EscapeString(to)))
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -781,10 +1016,19 @@ func normalizeSession(s session, defaultFrom, defaultTo string) session {
 	s.From = strings.ToUpper(strings.TrimSpace(s.From))
 	s.To = strings.ToUpper(strings.TrimSpace(s.To))
 	s.With = normalizeCurrencyList(s.With)
+	s.Round, _ = parseRoundMode(s.Round)
 	if s.Multiplier == 0 {
 		s.Multiplier = 1
 	}
 	return s
+}
+
+func defaultSession(defaultFrom, defaultTo string) session {
+	return normalizeSession(session{
+		From:       defaultFrom,
+		To:         defaultTo,
+		Multiplier: 1,
+	}, defaultFrom, defaultTo)
 }
 
 func hasInputSettings(s session) bool {
@@ -805,6 +1049,13 @@ func formatYesNo(value bool) string {
 	return "no"
 }
 
+func formatRoundMode(roundMode string) string {
+	if strings.TrimSpace(roundMode) == "" {
+		return "auto"
+	}
+	return roundMode
+}
+
 func settingsText(s session, snapshot rates.Snapshot) string {
 	s = normalizeSession(s, "", "")
 	updatedAt := "нет данных"
@@ -817,13 +1068,14 @@ func settingsText(s session, snapshot rates.Snapshot) string {
 	}
 
 	return fmt.Sprintf(
-		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМножитель входной суммы: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
+		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМножитель входной суммы: %s\nОкругление результата: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
 		s.From,
 		s.To,
 		updatedAt,
 		with,
 		formatYesNo(s.WithModify),
 		formatNumber(s.Multiplier),
+		formatRoundMode(s.Round),
 		formatPercent(s.ModifyFromPercent),
 		formatPercent(s.ModifyToPercent),
 	)
@@ -855,6 +1107,35 @@ func withReplyMarkup(amount float64, s session) *inlineKeyboardMarkup {
 			buttons,
 		},
 	}
+}
+
+func inlineConversionResult(reply string) inlineQueryResultArticle {
+	plain := stripTelegramHTML(reply)
+	title := firstLine(plain)
+	if title == "" {
+		title = "Конвертация"
+	}
+	return inlineQueryResultArticle{
+		Type:        "article",
+		ID:          "conversion",
+		Title:       title,
+		Description: strings.ReplaceAll(plain, "\n", " · "),
+		InputMessageContent: inputTextMessageContent{
+			MessageText: reply,
+			ParseMode:   "HTML",
+		},
+	}
+}
+
+func stripTelegramHTML(text string) string {
+	text = strings.ReplaceAll(text, "<b>", "")
+	text = strings.ReplaceAll(text, "</b>", "")
+	return html.UnescapeString(text)
+}
+
+func firstLine(text string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
+	return line
 }
 
 func withCallbackData(amount float64, s session, to string) (string, bool) {
@@ -1031,12 +1312,16 @@ func botCommands() []botCommand {
 		{Command: "settings", Description: "текущие настройки"},
 		{Command: "from", Description: "выбрать исходную валюту"},
 		{Command: "to", Description: "выбрать валюту результата"},
+		{Command: "swap", Description: "поменять валюты местами"},
 		{Command: "rate", Description: "текущий курс пары"},
 		{Command: "with", Description: "кнопки перевода в валюты"},
 		{Command: "with_modify", Description: "модификаторы для кнопок"},
 		{Command: "multi", Description: "множитель входной суммы"},
+		{Command: "round", Description: "округление результата"},
 		{Command: "modify_from", Description: "процент к входной сумме"},
 		{Command: "modify_to", Description: "процент к результату"},
+		{Command: "reset", Description: "сбросить настройки"},
+		{Command: "delete", Description: "удалить настройки"},
 		{Command: "list", Description: "список валют"},
 	}
 }
@@ -1070,6 +1355,7 @@ type update struct {
 	UpdateID      int64          `json:"update_id"`
 	Message       *message       `json:"message"`
 	CallbackQuery *callbackQuery `json:"callback_query"`
+	InlineQuery   *inlineQuery   `json:"inline_query"`
 }
 
 type message struct {
@@ -1092,4 +1378,23 @@ type callbackQuery struct {
 	From    *user    `json:"from"`
 	Message *message `json:"message"`
 	Data    string   `json:"data"`
+}
+
+type inlineQuery struct {
+	ID    string `json:"id"`
+	From  *user  `json:"from"`
+	Query string `json:"query"`
+}
+
+type inlineQueryResultArticle struct {
+	Type                string                  `json:"type"`
+	ID                  string                  `json:"id"`
+	Title               string                  `json:"title"`
+	Description         string                  `json:"description,omitempty"`
+	InputMessageContent inputTextMessageContent `json:"input_message_content"`
+}
+
+type inputTextMessageContent struct {
+	MessageText string `json:"message_text"`
+	ParseMode   string `json:"parse_mode,omitempty"`
 }

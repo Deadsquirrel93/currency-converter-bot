@@ -44,9 +44,6 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if len(users) == 0 {
-		return Config{}, errors.New("TELEGRAM_ALLOWED_USER_IDS must contain at least one telegram user id")
-	}
 	cfg.AllowedUsers = users
 
 	ttlRaw := strings.TrimSpace(os.Getenv("RATES_CACHE_TTL"))
@@ -64,6 +61,9 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) IsAllowed(userID int64) bool {
+	if len(c.AllowedUsers) == 0 {
+		return true
+	}
 	_, ok := c.AllowedUsers[userID]
 	return ok
 }
