@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"math"
 	"net/http"
@@ -146,6 +147,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		_ = b.sendMessage(ctx, chatID, supportedCurrenciesText())
 	case isCommand(text, "/settings"):
 		b.showSettings(ctx, chatID, userID)
+	case isCommand(text, "/rate"):
+		b.showRate(ctx, chatID, userID, text)
 	case isCommand(text, "/from"):
 		b.setCurrency(ctx, chatID, userID, text, true)
 	case isCommand(text, "/to"):
@@ -201,7 +204,7 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 	}
 
 	_ = b.answerCallbackQuery(ctx, query.ID, "")
-	_ = b.sendMessage(ctx, query.Message.Chat.ID, reply)
+	_ = b.sendHTMLMessage(ctx, query.Message.Chat.ID, reply)
 }
 
 func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
@@ -215,13 +218,8 @@ func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string
 		return
 	}
 
-	code := strings.ToUpper(strings.TrimSpace(fields[1]))
-	code = strings.TrimPrefix(code, "/")
-	if len(code) != 3 {
-		_ = b.sendMessage(ctx, chatID, "Код валюты должен быть трехбуквенным, например USD, EUR или RUB.")
-		return
-	}
-	if !isSupportedCurrency(code) {
+	code, ok := resolveCurrencyToken(fields[1])
+	if !ok {
 		_ = b.sendMessage(ctx, chatID, "Такой валюты нет в списке бота. Посмотрите доступные варианты через /list.")
 		return
 	}
@@ -348,14 +346,14 @@ func (b *Bot) showSettings(ctx context.Context, chatID, userID int64) {
 	_ = b.sendMessage(ctx, chatID, settingsText(s, snapshot))
 }
 
-func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text string) {
-	amount, amountCount, err := convert.ParseAmounts(text)
+func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
+	s := b.getSession(userID)
+	request, err := parseRateRequest(text, s)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.")
+		_ = b.sendMessage(ctx, chatID, err.Error())
 		return
 	}
 
-	s := b.getSession(userID)
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
@@ -363,22 +361,47 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		return
 	}
 
-	reply, err := conversionReply(amount, amountCount, s.From, s.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, snapshot)
+	reply, err := rateReply(request.From, request.To, snapshot)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте /from и /to.", err.Error()))
+		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте валюты.", err.Error()))
+		return
+	}
+	_ = b.sendMessage(ctx, chatID, reply)
+}
+
+func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text string) {
+	s := b.getSession(userID)
+	request, err := parseConversionInput(text, s)
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.")
+		return
+	}
+
+	snapshot, err := b.rates.Get(ctx)
+	if err != nil {
+		b.log.Error("rates unavailable", "error", err)
+		_ = b.sendMessage(ctx, chatID, "Не удалось получить курсы валют. Попробуйте чуть позже.")
+		return
+	}
+
+	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, snapshot)
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте валюты.", err.Error()))
 		return
 	}
 
 	var markup *inlineKeyboardMarkup
 	if len(s.With) > 0 {
-		markup = withReplyMarkup(amount, s)
+		buttonSession := s
+		buttonSession.From = request.From
+		markup = withReplyMarkup(request.Amount, buttonSession)
 	}
-	_ = b.sendMessageWithMarkup(ctx, chatID, reply, markup)
+	_ = b.sendHTMLMessageWithMarkup(ctx, chatID, reply, markup)
 }
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/multi 1000 - умножать входную сумму перед расчетом\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nПосле выбора пары пришлите сумму, например: 12 345,67. Можно прислать несколько сумм, каждую с новой строки, я сложу их и переведу итог.", s.From, s.To)
+	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ и отвечаю только пользователям из whitelist.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/rate USD RUB - показать текущий курс пары\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/multi 1000 - умножать входную сумму перед расчетом\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Несколько сумм с новой строки я сложу и переведу итог.", s.From, s.To)
 }
 
 func (b *Bot) getSession(userID int64) session {
@@ -399,7 +422,7 @@ func (b *Bot) setSession(userID int64, s session) {
 	b.mu.Unlock()
 
 	if err := b.writeSessions(snapshot); err != nil {
-		b.log.Error("save user settings failed", "error", err)
+		b.log.Error("save user settings failed", "path", b.cfg.UserSettingsFile, "error", err)
 	}
 }
 
@@ -423,7 +446,19 @@ func (b *Bot) sendMessage(ctx context.Context, chatID int64, text string) error 
 	return b.sendMessageWithMarkup(ctx, chatID, text, nil)
 }
 
+func (b *Bot) sendHTMLMessage(ctx context.Context, chatID int64, text string) error {
+	return b.sendHTMLMessageWithMarkup(ctx, chatID, text, nil)
+}
+
 func (b *Bot) sendMessageWithMarkup(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup) error {
+	return b.sendMessageWithMarkupAndParseMode(ctx, chatID, text, markup, "")
+}
+
+func (b *Bot) sendHTMLMessageWithMarkup(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup) error {
+	return b.sendMessageWithMarkupAndParseMode(ctx, chatID, text, markup, "HTML")
+}
+
+func (b *Bot) sendMessageWithMarkupAndParseMode(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup, parseMode string) error {
 	var result apiResponse
 	payload := map[string]any{
 		"chat_id": chatID,
@@ -431,6 +466,9 @@ func (b *Bot) sendMessageWithMarkup(ctx context.Context, chatID int64, text stri
 	}
 	if markup != nil {
 		payload["reply_markup"] = markup
+	}
+	if parseMode != "" {
+		payload["parse_mode"] = parseMode
 	}
 	err := b.post(ctx, "sendMessage", payload, &result)
 	if err != nil {
@@ -503,6 +541,14 @@ func isCommand(text, command string) bool {
 	return text == command || strings.HasPrefix(text, command+" ") || strings.HasPrefix(text, command+"@")
 }
 
+func commandArgs(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.Join(fields[1:], " ")
+}
+
 func sleep(ctx context.Context, d time.Duration) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -551,15 +597,11 @@ func parseCurrencyList(raw []string) ([]string, error) {
 	codes := make([]string, 0, len(raw))
 	seen := map[string]struct{}{}
 	for _, part := range raw {
-		code := strings.ToUpper(strings.TrimSpace(part))
-		code = strings.TrimPrefix(code, "/")
-		if code == "" {
+		if strings.TrimSpace(part) == "" {
 			continue
 		}
-		if len(code) != 3 {
-			return nil, errors.New("Код валюты должен быть трехбуквенным, например USD, EUR или RUB.")
-		}
-		if !isSupportedCurrency(code) {
+		code, ok := resolveCurrencyToken(part)
+		if !ok {
 			return nil, errors.New("Такой валюты нет в списке бота. Посмотрите доступные варианты через /list.")
 		}
 		if _, ok := seen[code]; ok {
@@ -574,8 +616,104 @@ func parseCurrencyList(raw []string) ([]string, error) {
 	return codes, nil
 }
 
+type conversionInput struct {
+	Amount      float64
+	AmountCount int
+	From        string
+	To          string
+}
+
+func parseConversionInput(text string, s session) (conversionInput, error) {
+	amount, amountCount, err := convert.ParseAmounts(text)
+	if err != nil {
+		return conversionInput{}, err
+	}
+
+	s = normalizeSession(s, "", "")
+	from := s.From
+	to := s.To
+	codes := currencyCodesFromText(text)
+	switch len(codes) {
+	case 0:
+	case 1:
+		from = codes[0]
+	default:
+		from = codes[0]
+		to = codes[1]
+	}
+
+	return conversionInput{
+		Amount:      amount,
+		AmountCount: amountCount,
+		From:        from,
+		To:          to,
+	}, nil
+}
+
+type rateRequest struct {
+	From string
+	To   string
+}
+
+func parseRateRequest(text string, s session) (rateRequest, error) {
+	s = normalizeSession(s, "", "")
+	args := commandArgs(text)
+	if unknown := firstUnknownCurrencyCodeToken(args); unknown != "" {
+		return rateRequest{}, fmt.Errorf("Не знаю валюту %s. Посмотрите доступные варианты через /list.", unknown)
+	}
+	codes := currencyCodesFromText(args)
+	switch len(codes) {
+	case 0:
+		return rateRequest{From: s.From, To: s.To}, nil
+	case 1:
+		return rateRequest{From: codes[0], To: s.To}, nil
+	default:
+		return rateRequest{From: codes[0], To: codes[1]}, nil
+	}
+}
+
 func applyPercent(value, percent float64) float64 {
 	return value * (1 + percent/100)
+}
+
+func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
+	direct, err := rates.Convert(1, from, to, snapshot)
+	if err != nil {
+		return "", err
+	}
+	reverse, err := rates.Convert(1, to, from, snapshot)
+	if err != nil {
+		return "", err
+	}
+
+	updatedAt := "нет данных"
+	if !snapshot.FetchedAt.IsZero() {
+		updatedAt = snapshot.FetchedAt.UTC().Format("2006-01-02 15:04:05 UTC")
+	}
+
+	return fmt.Sprintf(
+		"Курс:\n1 %s = %s %s\n1 %s = %s %s\nОбновлено: %s",
+		from,
+		formatRate(direct),
+		to,
+		to,
+		formatRate(reverse),
+		from,
+		updatedAt,
+	), nil
+}
+
+func formatRate(value float64) string {
+	if math.Abs(value) >= 1 {
+		return convert.FormatMoney(value)
+	}
+	formatted := strconv.FormatFloat(value, 'f', 6, 64)
+	formatted = strings.TrimRight(formatted, "0")
+	formatted = strings.TrimRight(formatted, ".")
+	if formatted == "" || formatted == "-0" {
+		formatted = "0"
+	}
+	return strings.ReplaceAll(formatted, ".", ",")
 }
 
 func conversionReply(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, snapshot rates.Snapshot) (string, error) {
@@ -593,33 +731,31 @@ func conversionReply(amount float64, amountCount int, from, to string, multiplie
 		result = applyPercent(baseResult, modifyToPercent)
 	}
 
-	unitRate, err := rates.Convert(1, from, to, snapshot)
+	rawUnitRate, err := rates.Convert(1, from, to, snapshot)
 	if err != nil {
 		return "", err
 	}
+	unitRate := rawUnitRate
 	unitRate *= multiplier
 	if useModify {
 		unitRate = applyPercent(applyPercent(unitRate, modifyFromPercent), modifyToPercent)
 	}
 
 	amountText := formatAmountWithSettings(amount, multipliedAmount, effectiveAmount, from)
-	replyPrefix := fmt.Sprintf("%s = %s %s", amountText, convert.FormatMoney(result), to)
+	resultText := fmt.Sprintf("%s %s", convert.FormatMoney(result), to)
+	replyPrefix := fmt.Sprintf("%s = <b>%s</b>", html.EscapeString(amountText), html.EscapeString(resultText))
 	if amountCount > 1 {
-		replyPrefix = fmt.Sprintf("Итого: %s = %s %s\nСтрок учтено: %d", amountText, convert.FormatMoney(result), to, amountCount)
+		replyPrefix = fmt.Sprintf("Итого: %s = <b>%s</b>\nСтрок учтено: %d", html.EscapeString(amountText), html.EscapeString(resultText), amountCount)
 	}
 
-	unitLabel := fmt.Sprintf("Курс: 1 %s", from)
-	if multiplier != 1 || (useModify && (modifyFromPercent != 0 || modifyToPercent != 0)) {
-		unitLabel = "Расчет для 1 введенной единицы"
-	}
-
-	return fmt.Sprintf(
-		"%s\n%s = %s %s",
+	lines := []string{
 		replyPrefix,
-		unitLabel,
-		convert.FormatMoney(unitRate),
-		to,
-	), nil
+		fmt.Sprintf("Курс: 1 %s = %s %s", html.EscapeString(from), html.EscapeString(formatRate(rawUnitRate)), html.EscapeString(to)),
+	}
+	if multiplier != 1 || (useModify && (modifyFromPercent != 0 || modifyToPercent != 0)) {
+		lines = append(lines, fmt.Sprintf("Расчет для 1 введенной единицы = %s %s", html.EscapeString(convert.FormatMoney(unitRate)), html.EscapeString(to)))
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func formatAmountWithSettings(amount, multipliedAmount, effectiveAmount float64, currency string) string {
@@ -895,6 +1031,7 @@ func botCommands() []botCommand {
 		{Command: "settings", Description: "текущие настройки"},
 		{Command: "from", Description: "выбрать исходную валюту"},
 		{Command: "to", Description: "выбрать валюту результата"},
+		{Command: "rate", Description: "текущий курс пары"},
 		{Command: "with", Description: "кнопки перевода в валюты"},
 		{Command: "with_modify", Description: "модификаторы для кнопок"},
 		{Command: "multi", Description: "множитель входной суммы"},

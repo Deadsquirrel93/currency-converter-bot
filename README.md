@@ -5,8 +5,11 @@ Telegram-бот на Go, который отвечает только польз
 ## Возможности
 
 - whitelist пользователей через `TELEGRAM_ALLOWED_USER_IDS`
-- команды `/from USD`, `/to EUR`, `/with USD EUR RUB`, `/with_modify yes`, `/multi 1000`, `/modify_from 1.5`, `/modify_to 1.5`, `/settings`, `/help`, `/list`
+- команды `/from USD`, `/to EUR`, `/rate USD EUR`, `/with USD EUR RUB`, `/with_modify yes`, `/multi 1000`, `/modify_from 1.5`, `/modify_to 1.5`, `/settings`, `/help`, `/list`
 - ввод суммы свободным текстом: `12 345,67 usd` -> `12345.67`
+- быстрый перевод без смены настроек: `100 usd to eur`, `100$ в руб`, `250 евро`
+- алиасы и символы популярных валют: `$`, `€`, `₽`, `руб`, `сум`, `баксы`, `тенге`
+- итоговая сумма в ответе выделяется жирным, рядом показывается курс за 1 единицу
 - ввод нескольких сумм с новой строки: бот сложит их и переведет итог
 - курсы валют из официального XML ЦБ РФ
 - файловый кеш курсов на 60 минут
@@ -25,19 +28,35 @@ cp .env.example .env
 2. Заполните `.env`:
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=123456:telegram_token
-TELEGRAM_ALLOWED_USER_IDS=111111111,222222222
+TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+TELEGRAM_ALLOWED_USER_IDS=YOUR_TELEGRAM_USER_ID,ANOTHER_TELEGRAM_USER_ID
 DEFAULT_FROM=USD
 DEFAULT_TO=RUB
-USER_SETTINGS_FILE=data/user_settings.json
+RATES_CACHE_FILE=/app/data/rates_cache.json
+USER_SETTINGS_FILE=/app/data/user_settings.json
 CBR_DAILY_URLS=https://www.cbr.ru/scripts/XML_daily.asp
 ```
 
-3. Запустите:
+3. Подготовьте папку для кеша курсов и пользовательских настроек:
+
+```bash
+mkdir -p data
+sudo chown -R 10001:10001 data
+```
+
+4. Запустите:
 
 ```bash
 docker compose up -d --build
 ```
+
+Если настройки не сохраняются, проверьте логи:
+
+```bash
+docker compose logs bot
+```
+
+Ошибка вида `permission denied` для `/app/data/user_settings.json.tmp` означает, что папка `data` на хосте недоступна пользователю контейнера.
 
 ## Использование
 
@@ -47,6 +66,8 @@ docker compose up -d --build
 /from USD
 /to RUB
 12 345,67
+100 usd to rub
+100$ в руб
 ```
 
 Бот ответит конвертацией из `USD` в `RUB`.
@@ -66,6 +87,8 @@ docker compose up -d --build
 `/help` показывает справку, а `/list` возвращает список поддерживаемых популярных валют с кодом, названием и страной.
 
 `/settings` показывает текущую валютную пару, время обновления курсов, множитель и процентные модификаторы.
+
+`/rate USD RUB` показывает текущий курс пары без конвертации суммы. Можно писать алиасами: `/rate $ руб`, `/rate сум евро`. Если валюты не указаны, используется текущая пара из настроек.
 
 `/with USD EUR RUB` добавляет к ответу кнопки `в USD`, `в EUR`, `в RUB`. При нажатии бот пересчитает ту же введенную сумму из исходной валюты в валюту кнопки. `/with off` отключает кнопки.
 

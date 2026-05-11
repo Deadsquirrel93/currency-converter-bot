@@ -88,6 +88,79 @@ func TestParseYesNo(t *testing.T) {
 	}
 }
 
+func TestResolveCurrencyToken(t *testing.T) {
+	tests := map[string]string{
+		"usd":    "USD",
+		"$":      "USD",
+		"баксов": "USD",
+		"€":      "EUR",
+		"руб":    "RUB",
+		"сум":    "UZS",
+		"тенге":  "KZT",
+	}
+
+	for input, want := range tests {
+		got, ok := resolveCurrencyToken(input)
+		if !ok {
+			t.Fatalf("resolveCurrencyToken(%q) ok = false", input)
+		}
+		if got != want {
+			t.Fatalf("resolveCurrencyToken(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestParseConversionInputUsesInlineCurrencies(t *testing.T) {
+	s := session{From: "EUR", To: "KZT", Multiplier: 1}
+
+	tests := map[string]conversionInput{
+		"100 usd to rub": {Amount: 100, AmountCount: 1, From: "USD", To: "RUB"},
+		"100$ в руб":     {Amount: 100, AmountCount: 1, From: "USD", To: "RUB"},
+		"250 евро":       {Amount: 250, AmountCount: 1, From: "EUR", To: "KZT"},
+		"100\n200":       {Amount: 300, AmountCount: 2, From: "EUR", To: "KZT"},
+	}
+
+	for input, want := range tests {
+		got, err := parseConversionInput(input, s)
+		if err != nil {
+			t.Fatalf("parseConversionInput(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("parseConversionInput(%q) = %+v, want %+v", input, got, want)
+		}
+	}
+}
+
+func TestParseRateRequest(t *testing.T) {
+	s := session{From: "USD", To: "RUB", Multiplier: 1}
+
+	tests := map[string]rateRequest{
+		"/rate":               {From: "USD", To: "RUB"},
+		"/rate eur":           {From: "EUR", To: "RUB"},
+		"/rate $ в руб":       {From: "USD", To: "RUB"},
+		"/rate usd for rub":   {From: "USD", To: "RUB"},
+		"/rate сум евро":      {From: "UZS", To: "EUR"},
+		"/rate@mybot eur rub": {From: "EUR", To: "RUB"},
+	}
+
+	for input, want := range tests {
+		got, err := parseRateRequest(input, s)
+		if err != nil {
+			t.Fatalf("parseRateRequest(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("parseRateRequest(%q) = %+v, want %+v", input, got, want)
+		}
+	}
+}
+
+func TestParseRateRequestRejectsUnknownCurrencyCode(t *testing.T) {
+	s := session{From: "USD", To: "RUB", Multiplier: 1}
+	if _, err := parseRateRequest("/rate btc usd", s); err == nil {
+		t.Fatal("parseRateRequest() error = nil, want error")
+	}
+}
+
 func TestApplyPercent(t *testing.T) {
 	if got := applyPercent(1000, 50); got != 1500 {
 		t.Fatalf("applyPercent(1000, 50) = %v, want 1500", got)
@@ -128,16 +201,51 @@ func TestConversionReplyCanSkipModifiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conversionReply without modifiers: %v", err)
 	}
-	if !strings.Contains(withoutModifiers, "10 000,00 UZS = 1,00 USD") {
-		t.Fatalf("conversionReply without modifiers = %q", withoutModifiers)
+	for _, want := range []string{
+		"10 000,00 UZS = <b>1,00 USD</b>",
+		"Курс: 1 UZS = 0,0001 USD",
+	} {
+		if !strings.Contains(withoutModifiers, want) {
+			t.Fatalf("conversionReply without modifiers must contain %q, got %q", want, withoutModifiers)
+		}
 	}
 
 	withModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, true, snapshot)
 	if err != nil {
 		t.Fatalf("conversionReply with modifiers: %v", err)
 	}
-	if !strings.Contains(withModifiers, "10 000,00 (15 000,00) UZS = 2,25 USD") {
-		t.Fatalf("conversionReply with modifiers = %q", withModifiers)
+	for _, want := range []string{
+		"10 000,00 (15 000,00) UZS = <b>2,25 USD</b>",
+		"Курс: 1 UZS = 0,0001 USD",
+		"Расчет для 1 введенной единицы = 0,00 USD",
+	} {
+		if !strings.Contains(withModifiers, want) {
+			t.Fatalf("conversionReply with modifiers must contain %q, got %q", want, withModifiers)
+		}
+	}
+}
+
+func TestRateReply(t *testing.T) {
+	snapshot := rates.Snapshot{
+		FetchedAt: time.Date(2026, 5, 10, 9, 30, 0, 0, time.UTC),
+		Rates: map[string]rates.Rate{
+			"RUB": {Code: "RUB", Nominal: 1, Value: 1},
+			"USD": {Code: "USD", Nominal: 1, Value: 100},
+		},
+	}
+
+	got, err := rateReply("USD", "RUB", snapshot)
+	if err != nil {
+		t.Fatalf("rateReply(): %v", err)
+	}
+	for _, want := range []string{
+		"1 USD = 100,00 RUB",
+		"1 RUB = 0,01 USD",
+		"Обновлено: 2026-05-10 09:30:00 UTC",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rateReply() must contain %q, got:\n%s", want, got)
+		}
 	}
 }
 
@@ -180,7 +288,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "settings", "from", "to", "with", "with_modify", "multi", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "settings", "from", "to", "rate", "with", "with_modify", "multi", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
