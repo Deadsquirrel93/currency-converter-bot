@@ -11,6 +11,13 @@ import (
 var ErrNoAmount = errors.New("no amount found")
 
 func ParseAmount(input string) (float64, error) {
+	if value, ok := parseMultiplication(input); ok {
+		return value, nil
+	}
+	return parsePlainAmount(input)
+}
+
+func parsePlainAmount(input string) (float64, error) {
 	var cleaned []rune
 	separatorIndex := -1
 
@@ -41,6 +48,79 @@ func ParseAmount(input string) (float64, error) {
 		return 0, ErrNoAmount
 	}
 	return value, nil
+}
+
+func parseMultiplication(input string) (float64, bool) {
+	runes := []rune(input)
+	for i, r := range runes {
+		if !isMultiplicationSign(r) {
+			continue
+		}
+
+		left, ok := leftOperand(runes, i)
+		if !ok {
+			continue
+		}
+		right, ok := rightOperand(runes, i+1)
+		if !ok {
+			continue
+		}
+
+		leftValue, err := parsePlainAmount(left)
+		if err != nil {
+			continue
+		}
+		rightValue, err := parsePlainAmount(right)
+		if err != nil {
+			continue
+		}
+		value := leftValue * rightValue
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		return value, true
+	}
+	return 0, false
+}
+
+func leftOperand(runes []rune, operatorIndex int) (string, bool) {
+	i := operatorIndex - 1
+	for i >= 0 && unicode.IsSpace(runes[i]) {
+		i--
+	}
+	if i < 0 || !unicode.IsDigit(runes[i]) {
+		return "", false
+	}
+
+	end := i + 1
+	for i >= 0 && isAmountRune(runes[i]) {
+		i--
+	}
+	return string(runes[i+1 : end]), true
+}
+
+func rightOperand(runes []rune, startIndex int) (string, bool) {
+	i := startIndex
+	for i < len(runes) && unicode.IsSpace(runes[i]) {
+		i++
+	}
+	if i >= len(runes) || !unicode.IsDigit(runes[i]) {
+		return "", false
+	}
+
+	start := i
+	for i < len(runes) && isAmountRune(runes[i]) {
+		i++
+	}
+	return string(runes[start:i]), true
+}
+
+func isMultiplicationSign(r rune) bool {
+	return r == '*' || r == 'x' || r == 'X' || r == 'х' || r == 'Х'
+}
+
+func isAmountRune(r rune) bool {
+	return unicode.IsDigit(r) || r == '.' || r == ',' || unicode.IsSpace(r)
 }
 
 func ParseAmounts(input string) (float64, int, error) {
