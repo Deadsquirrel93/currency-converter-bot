@@ -36,6 +36,7 @@ type session struct {
 	To                string   `json:"to"`
 	With              []string `json:"with,omitempty"`
 	WithModify        bool     `json:"with_modify"`
+	InlineModify      bool     `json:"inline_modify"`
 	Multiplier        float64  `json:"multiplier"`
 	Round             string   `json:"round,omitempty"`
 	ModifyFromPercent float64  `json:"modify_from_percent"`
@@ -168,6 +169,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		b.setWithCurrency(ctx, chatID, userID, text)
 	case isCommand(text, "/with_modify"):
 		b.setWithModify(ctx, chatID, userID, text)
+	case isCommand(text, "/inline_modify"):
+		b.setInlineModify(ctx, chatID, userID, text)
 	case isCommand(text, "/multi"):
 		b.setMultiplier(ctx, chatID, userID, text)
 	case isCommand(text, "/round"):
@@ -252,7 +255,8 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 		return
 	}
 
-	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, s.Round, snapshot)
+	settings := conversionSettingsForInput(s, request)
+	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot)
 	if err != nil {
 		_ = b.answerInlineQuery(ctx, query.ID, nil)
 		return
@@ -338,6 +342,29 @@ func (b *Bot) setWithModify(ctx context.Context, chatID, userID int64, text stri
 		return
 	}
 	_ = b.sendMessage(ctx, chatID, "Готово: кнопки /with не будут учитывать modify_from и modify_to.")
+}
+
+func (b *Bot) setInlineModify(ctx context.Context, chatID, userID int64, text string) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		_ = b.sendMessage(ctx, chatID, "Укажите yes или no: /inline_modify yes.")
+		return
+	}
+
+	value, err := parseYesNo(fields[1])
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, "Значение должно быть yes или no.")
+		return
+	}
+
+	s := b.getSession(userID)
+	s.InlineModify = value
+	b.setSession(userID, s)
+	if value {
+		_ = b.sendMessage(ctx, chatID, "Готово: явные валюты в тексте будут учитывать modify_from и modify_to.")
+		return
+	}
+	_ = b.sendMessage(ctx, chatID, "Готово: явные валюты в тексте не будут учитывать modify_from и modify_to.")
 }
 
 func (b *Bot) setMultiplier(ctx context.Context, chatID, userID int64, text string) {
@@ -477,7 +504,8 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		return
 	}
 
-	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, s.Multiplier, s.ModifyFromPercent, s.ModifyToPercent, true, s.Round, snapshot)
+	settings := conversionSettingsForInput(s, request)
+	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте валюты.", err.Error()))
 		return
@@ -487,6 +515,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 	if len(s.With) > 0 {
 		buttonSession := s
 		buttonSession.From = request.From
+		buttonSession.Multiplier = settings.Multiplier
 		markup = withReplyMarkup(request.Amount, buttonSession)
 	}
 	_ = b.sendHTMLMessageWithMarkup(ctx, chatID, reply, markup)
@@ -494,7 +523,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если whitelist пустой, я доступен всем; если задан, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Для покупок можно писать 100х9, 100 x 9 или 100 * 9; русская и английская х/x поддерживаются. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub.", s.From, s.To)
+	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если whitelist пустой, я доступен всем; если задан, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/inline_modify yes - учитывать modify_from и modify_to для явных валют в тексте\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Когда валюты указаны в тексте явно, /multi не применяется, а modify_from и modify_to применяются только после /inline_modify yes. Для покупок можно писать 100х9, 100 x 9 или 100 * 9; русская и английская х/x поддерживаются. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub.", s.From, s.To)
 }
 
 func (b *Bot) getSession(userID int64) session {
@@ -771,6 +800,7 @@ type conversionInput struct {
 	AmountCount int
 	From        string
 	To          string
+	Inline      bool
 }
 
 func parseConversionInput(text string, s session) (conversionInput, error) {
@@ -797,7 +827,30 @@ func parseConversionInput(text string, s session) (conversionInput, error) {
 		AmountCount: amountCount,
 		From:        from,
 		To:          to,
+		Inline:      len(codes) > 0,
 	}, nil
+}
+
+type conversionSettings struct {
+	Multiplier        float64
+	ModifyFromPercent float64
+	ModifyToPercent   float64
+	UseModify         bool
+}
+
+func conversionSettingsForInput(s session, input conversionInput) conversionSettings {
+	s = normalizeSession(s, "", "")
+	settings := conversionSettings{
+		Multiplier:        s.Multiplier,
+		ModifyFromPercent: s.ModifyFromPercent,
+		ModifyToPercent:   s.ModifyToPercent,
+		UseModify:         true,
+	}
+	if input.Inline {
+		settings.Multiplier = 1
+		settings.UseModify = s.InlineModify
+	}
+	return settings
 }
 
 type rateRequest struct {
@@ -1068,12 +1121,13 @@ func settingsText(s session, snapshot rates.Snapshot) string {
 	}
 
 	return fmt.Sprintf(
-		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМножитель входной суммы: %s\nОкругление результата: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
+		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМодификаторы для явных валют: %s\nМножитель входной суммы: %s\nОкругление результата: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
 		s.From,
 		s.To,
 		updatedAt,
 		with,
 		formatYesNo(s.WithModify),
+		formatYesNo(s.InlineModify),
 		formatNumber(s.Multiplier),
 		formatRoundMode(s.Round),
 		formatPercent(s.ModifyFromPercent),
@@ -1316,6 +1370,7 @@ func botCommands() []botCommand {
 		{Command: "rate", Description: "текущий курс пары"},
 		{Command: "with", Description: "кнопки перевода в валюты"},
 		{Command: "with_modify", Description: "модификаторы для кнопок"},
+		{Command: "inline_modify", Description: "модификаторы для явных валют"},
 		{Command: "multi", Description: "множитель входной суммы"},
 		{Command: "round", Description: "округление результата"},
 		{Command: "modify_from", Description: "процент к входной сумме"},

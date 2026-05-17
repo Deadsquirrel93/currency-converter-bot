@@ -114,9 +114,9 @@ func TestParseConversionInputUsesInlineCurrencies(t *testing.T) {
 	s := session{From: "EUR", To: "KZT", Multiplier: 1}
 
 	tests := map[string]conversionInput{
-		"100 usd to rub": {Amount: 100, AmountCount: 1, From: "USD", To: "RUB"},
-		"100$ в руб":     {Amount: 100, AmountCount: 1, From: "USD", To: "RUB"},
-		"250 евро":       {Amount: 250, AmountCount: 1, From: "EUR", To: "KZT"},
+		"100 usd to rub": {Amount: 100, AmountCount: 1, From: "USD", To: "RUB", Inline: true},
+		"100$ в руб":     {Amount: 100, AmountCount: 1, From: "USD", To: "RUB", Inline: true},
+		"250 евро":       {Amount: 250, AmountCount: 1, From: "EUR", To: "KZT", Inline: true},
 		"100\n200":       {Amount: 300, AmountCount: 2, From: "EUR", To: "KZT"},
 	}
 
@@ -128,6 +128,52 @@ func TestParseConversionInputUsesInlineCurrencies(t *testing.T) {
 		if got != want {
 			t.Fatalf("parseConversionInput(%q) = %+v, want %+v", input, got, want)
 		}
+	}
+}
+
+func TestConversionSettingsForInlineInputIgnoresInputSettingsByDefault(t *testing.T) {
+	settings := conversionSettingsForInput(session{
+		Multiplier:        1000,
+		ModifyFromPercent: 10,
+		ModifyToPercent:   20,
+	}, conversionInput{Inline: true})
+
+	if settings.Multiplier != 1 {
+		t.Fatalf("Multiplier = %v, want 1", settings.Multiplier)
+	}
+	if settings.UseModify {
+		t.Fatal("UseModify = true, want false")
+	}
+}
+
+func TestConversionSettingsForInlineInputCanUseModifiers(t *testing.T) {
+	settings := conversionSettingsForInput(session{
+		InlineModify:      true,
+		Multiplier:        1000,
+		ModifyFromPercent: 10,
+		ModifyToPercent:   20,
+	}, conversionInput{Inline: true})
+
+	if settings.Multiplier != 1 {
+		t.Fatalf("Multiplier = %v, want 1", settings.Multiplier)
+	}
+	if !settings.UseModify {
+		t.Fatal("UseModify = false, want true")
+	}
+	if settings.ModifyFromPercent != 10 || settings.ModifyToPercent != 20 {
+		t.Fatalf("settings = %+v", settings)
+	}
+}
+
+func TestConversionSettingsForSessionPairKeepsInputSettings(t *testing.T) {
+	settings := conversionSettingsForInput(session{
+		Multiplier:        1000,
+		ModifyFromPercent: 10,
+		ModifyToPercent:   20,
+	}, conversionInput{})
+
+	if settings.Multiplier != 1000 || !settings.UseModify || settings.ModifyFromPercent != 10 || settings.ModifyToPercent != 20 {
+		t.Fatalf("settings = %+v", settings)
 	}
 }
 
@@ -321,6 +367,7 @@ func TestSettingsText(t *testing.T) {
 		"Курсы обновлены: 2026-05-10 09:30:00 UTC",
 		"Кнопки перевода: EUR, USD",
 		"Модификаторы для кнопок: yes",
+		"Модификаторы для явных валют: no",
 		"Множитель входной суммы: 1 000",
 		"Округление результата: 4",
 		"Модификатор входной суммы: +1,5%",
@@ -345,7 +392,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "settings", "from", "to", "swap", "rate", "reset", "delete", "with", "with_modify", "multi", "round", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "settings", "from", "to", "swap", "rate", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
@@ -411,6 +458,7 @@ func TestBotPersistsSessions(t *testing.T) {
 		To:                "RUB",
 		With:              []string{"USD", "EUR"},
 		WithModify:        true,
+		InlineModify:      true,
 		Multiplier:        1000,
 		Round:             "4",
 		ModifyFromPercent: 1.5,
@@ -427,6 +475,9 @@ func TestBotPersistsSessions(t *testing.T) {
 	if !strings.Contains(string(raw), `"round": "4"`) {
 		t.Fatalf("settings file must contain round, got:\n%s", string(raw))
 	}
+	if !strings.Contains(string(raw), `"inline_modify": true`) {
+		t.Fatalf("settings file must contain inline_modify, got:\n%s", string(raw))
+	}
 
 	restarted := New(cfg, nil, logger)
 	got := restarted.getSession(42)
@@ -435,6 +486,7 @@ func TestBotPersistsSessions(t *testing.T) {
 		To:                "RUB",
 		With:              []string{"USD", "EUR"},
 		WithModify:        true,
+		InlineModify:      true,
 		Multiplier:        1000,
 		Round:             "4",
 		ModifyFromPercent: 1.5,
@@ -460,6 +512,7 @@ func TestBotResetsSessionToDefaults(t *testing.T) {
 		To:                "EUR",
 		With:              []string{"USD"},
 		WithModify:        true,
+		InlineModify:      true,
 		Multiplier:        1000,
 		Round:             "4",
 		ModifyFromPercent: 1.5,
@@ -477,7 +530,7 @@ func TestBotResetsSessionToDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%q): %v", settingsFile, err)
 	}
-	for _, unwanted := range []string{`"with"`, `"round"`, `"modify_from_percent": 1.5`, `"modify_to_percent": -2`, `"multiplier": 1000`} {
+	for _, unwanted := range []string{`"with"`, `"round"`, `"inline_modify": true`, `"modify_from_percent": 1.5`, `"modify_to_percent": -2`, `"multiplier": 1000`} {
 		if strings.Contains(string(raw), unwanted) {
 			t.Fatalf("settings file must not contain %q after reset, got:\n%s", unwanted, string(raw))
 		}
