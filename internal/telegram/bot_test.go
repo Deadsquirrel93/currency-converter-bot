@@ -350,6 +350,48 @@ func TestRateReply(t *testing.T) {
 	}
 }
 
+func TestParseSubscription(t *testing.T) {
+	s := session{From: "USD", To: "RUB", Multiplier: 1}
+
+	tests := map[string]dailySubscription{
+		"/subscribe 09:00":         {From: "USD", To: "RUB", Time: "09:00"},
+		"/subscribe 9:05 eur":      {From: "EUR", To: "RUB", Time: "09:05"},
+		"/subscribe 18:30 $ в руб": {From: "USD", To: "RUB", Time: "18:30"},
+	}
+
+	for input, want := range tests {
+		got, err := parseSubscription(input, s)
+		if err != nil {
+			t.Fatalf("parseSubscription(%q): %v", input, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("parseSubscription(%q) = %+v, want %+v", input, got, want)
+		}
+	}
+}
+
+func TestParseSubscriptionRejectsInvalidInput(t *testing.T) {
+	s := session{From: "USD", To: "RUB", Multiplier: 1}
+	for _, input := range []string{"/subscribe", "/subscribe 24:00", "/subscribe 09:60", "/subscribe 09:00 BTC"} {
+		if _, err := parseSubscription(input, s); err == nil {
+			t.Fatalf("parseSubscription(%q) error = nil, want error", input)
+		}
+	}
+}
+
+func TestDailyTimePassed(t *testing.T) {
+	now := time.Date(2026, 5, 10, 9, 30, 0, 0, time.UTC)
+	if !dailyTimePassed("09:00", now) {
+		t.Fatal("dailyTimePassed(09:00) = false, want true")
+	}
+	if !dailyTimePassed("09:30", now) {
+		t.Fatal("dailyTimePassed(09:30) = false, want true")
+	}
+	if dailyTimePassed("09:31", now) {
+		t.Fatal("dailyTimePassed(09:31) = true, want false")
+	}
+}
+
 func TestSettingsText(t *testing.T) {
 	text := settingsText(session{
 		From:              "USD",
@@ -392,7 +434,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "settings", "from", "to", "swap", "rate", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
@@ -494,6 +536,71 @@ func TestBotPersistsSessions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("restored session = %+v, want %+v", got, want)
+	}
+}
+
+func TestBotPersistsSubscriptions(t *testing.T) {
+	subscriptionsFile := filepath.Join(t.TempDir(), "subscriptions.json")
+	cfg := config.Config{
+		DefaultFrom:       "USD",
+		DefaultTo:         "RUB",
+		SubscriptionsFile: subscriptionsFile,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	bot := New(cfg, nil, logger)
+	bot.setUserSubscription(42, dailySubscription{
+		ChatID:       100,
+		From:         "usd",
+		To:           "rub",
+		Time:         "9:00",
+		LastSentDate: "2026-05-10",
+	})
+
+	raw, err := os.ReadFile(subscriptionsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", subscriptionsFile, err)
+	}
+	for _, want := range []string{`"chat_id": 100`, `"from": "USD"`, `"to": "RUB"`, `"time": "09:00"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("subscriptions file must contain %q, got:\n%s", want, string(raw))
+		}
+	}
+
+	restarted := New(cfg, nil, logger)
+	got, ok := restarted.getUserSubscription(42)
+	if !ok {
+		t.Fatal("subscription was not restored")
+	}
+	want := dailySubscription{
+		ChatID:       100,
+		From:         "USD",
+		To:           "RUB",
+		Time:         "09:00",
+		LastSentDate: "2026-05-10",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("restored subscription = %+v, want %+v", got, want)
+	}
+}
+
+func TestDueSubscriptionsSkipsAlreadySentToday(t *testing.T) {
+	bot := New(config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bot.subscriptions = map[int64]dailySubscription{
+		1: {ChatID: 100, From: "USD", To: "RUB", Time: "09:00"},
+		2: {ChatID: 200, From: "EUR", To: "RUB", Time: "09:00", LastSentDate: "2026-05-10"},
+		3: {ChatID: 300, From: "CNY", To: "RUB", Time: "10:00"},
+	}
+
+	due := bot.dueSubscriptions(time.Date(2026, 5, 10, 9, 30, 0, 0, time.UTC))
+	if _, ok := due[1]; !ok {
+		t.Fatal("subscription 1 must be due")
+	}
+	if _, ok := due[2]; ok {
+		t.Fatal("subscription 2 must not be due after being sent today")
+	}
+	if _, ok := due[3]; ok {
+		t.Fatal("subscription 3 must not be due before scheduled time")
 	}
 }
 

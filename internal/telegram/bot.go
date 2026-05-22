@@ -23,12 +23,15 @@ import (
 )
 
 type Bot struct {
-	cfg      config.Config
-	rates    *rates.Provider
-	client   *http.Client
-	log      *slog.Logger
-	mu       sync.RWMutex
-	sessions map[int64]session
+	cfg                  config.Config
+	rates                *rates.Provider
+	client               *http.Client
+	log                  *slog.Logger
+	mu                   sync.RWMutex
+	sessions             map[int64]session
+	subMu                sync.RWMutex
+	subscriptions        map[int64]dailySubscription
+	subscriptionLocation *time.Location
 }
 
 type session struct {
@@ -41,6 +44,14 @@ type session struct {
 	Round             string   `json:"round,omitempty"`
 	ModifyFromPercent float64  `json:"modify_from_percent"`
 	ModifyToPercent   float64  `json:"modify_to_percent"`
+}
+
+type dailySubscription struct {
+	ChatID       int64  `json:"chat_id"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	Time         string `json:"time"`
+	LastSentDate string `json:"last_sent_date,omitempty"`
 }
 
 func (s *session) UnmarshalJSON(raw []byte) error {
@@ -75,15 +86,24 @@ func (s *session) UnmarshalJSON(raw []byte) error {
 }
 
 func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot {
+	subscriptionLocation, err := loadSubscriptionLocation(cfg.SubscriptionTimezone)
+	if err != nil {
+		logger.Warn("load subscription timezone failed", "timezone", cfg.SubscriptionTimezone, "error", err)
+	}
 	b := &Bot{
-		cfg:      cfg,
-		rates:    provider,
-		client:   &http.Client{Timeout: 70 * time.Second},
-		log:      logger,
-		sessions: map[int64]session{},
+		cfg:                  cfg,
+		rates:                provider,
+		client:               &http.Client{Timeout: 70 * time.Second},
+		log:                  logger,
+		sessions:             map[int64]session{},
+		subscriptions:        map[int64]dailySubscription{},
+		subscriptionLocation: subscriptionLocation,
 	}
 	if err := b.loadSessions(); err != nil {
 		b.log.Warn("load user settings failed", "error", err)
+	}
+	if err := b.loadSubscriptions(); err != nil {
+		b.log.Warn("load subscriptions failed", "error", err)
 	}
 	return b
 }
@@ -92,6 +112,8 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err := b.setBotCommands(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		b.log.Warn("set bot commands failed", "error", err)
 	}
+
+	go b.runSubscriptionScheduler(ctx)
 
 	var offset int64
 	for {
@@ -155,6 +177,12 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		b.showSettings(ctx, chatID, userID)
 	case isCommand(text, "/rate"):
 		b.showRate(ctx, chatID, userID, text)
+	case isCommand(text, "/subscribe"):
+		b.setSubscription(ctx, chatID, userID, text)
+	case isCommand(text, "/subscription"):
+		b.showSubscription(ctx, chatID, userID)
+	case isCommand(text, "/unsubscribe"):
+		b.deleteSubscription(ctx, chatID, userID)
 	case isCommand(text, "/swap"):
 		b.swapCurrencies(ctx, chatID, userID)
 	case isCommand(text, "/reset"):
@@ -489,6 +517,47 @@ func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 	_ = b.sendMessage(ctx, chatID, reply)
 }
 
+func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text string) {
+	fields := strings.Fields(text)
+	if len(fields) == 2 && isOffValue(fields[1]) {
+		b.deleteSubscription(ctx, chatID, userID)
+		return
+	}
+
+	s := b.getSession(userID)
+	subscription, err := parseSubscription(text, s)
+	if err != nil {
+		_ = b.sendMessage(ctx, chatID, err.Error())
+		return
+	}
+	subscription.ChatID = chatID
+	subscription.LastSentDate = ""
+	now := time.Now().In(b.subscriptionLocation)
+	if dailyTimePassed(subscription.Time, now) {
+		subscription.LastSentDate = subscriptionDate(now)
+	}
+
+	b.setUserSubscription(userID, subscription)
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: буду присылать курс %s -> %s каждый день в %s (%s).", subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
+}
+
+func (b *Bot) showSubscription(ctx context.Context, chatID, userID int64) {
+	subscription, ok := b.getUserSubscription(userID)
+	if !ok {
+		_ = b.sendMessage(ctx, chatID, "Подписка выключена. Включить: /subscribe 09:00 или /subscribe 09:00 USD RUB.")
+		return
+	}
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Подписка:\nПара: %s -> %s\nВремя: %s (%s)\nОтключить: /unsubscribe", subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
+}
+
+func (b *Bot) deleteSubscription(ctx context.Context, chatID, userID int64) {
+	if b.removeUserSubscription(userID) {
+		_ = b.sendMessage(ctx, chatID, "Подписка отключена.")
+		return
+	}
+	_ = b.sendMessage(ctx, chatID, "Подписка уже выключена.")
+}
+
 func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text string) {
 	s := b.getSession(userID)
 	request, err := parseConversionInput(text, s)
@@ -523,7 +592,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если whitelist пустой, я доступен всем; если задан, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/inline_modify yes - учитывать modify_from и modify_to для явных валют в тексте\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Когда валюты указаны в тексте явно, /multi не применяется, а modify_from и modify_to применяются только после /inline_modify yes. Для покупок можно писать 100х9, 100 x 9 или 100 * 9; русская и английская х/x поддерживаются. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub.", s.From, s.To)
+	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если whitelist пустой, я доступен всем; если задан, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/subscribe 09:00 - ежедневный курс текущей пары\n/subscribe 09:00 USD RUB - ежедневный курс выбранной пары\n/subscription - показать подписку\n/unsubscribe - отключить подписку\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/inline_modify yes - учитывать modify_from и modify_to для явных валют в тексте\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Когда валюты указаны в тексте явно, /multi не применяется, а modify_from и modify_to применяются только после /inline_modify yes. Для покупок можно писать 100х9, 100 x 9 или 100 * 9; русская и английская х/x поддерживаются. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub.", s.From, s.To)
 }
 
 func (b *Bot) getSession(userID int64) session {
@@ -557,6 +626,44 @@ func (b *Bot) deleteSession(userID int64) {
 	if err := b.writeSessions(snapshot); err != nil {
 		b.log.Error("delete user settings failed", "path", b.cfg.UserSettingsFile, "error", err)
 	}
+}
+
+func (b *Bot) getUserSubscription(userID int64) (dailySubscription, bool) {
+	b.subMu.RLock()
+	subscription, ok := b.subscriptions[userID]
+	b.subMu.RUnlock()
+	if !ok {
+		return dailySubscription{}, false
+	}
+	return normalizeSubscription(subscription), true
+}
+
+func (b *Bot) setUserSubscription(userID int64, subscription dailySubscription) {
+	subscription = normalizeSubscription(subscription)
+	b.subMu.Lock()
+	b.subscriptions[userID] = subscription
+	snapshot := copySubscriptions(b.subscriptions)
+	b.subMu.Unlock()
+
+	if err := b.writeSubscriptions(snapshot); err != nil {
+		b.log.Error("save subscriptions failed", "path", b.cfg.SubscriptionsFile, "error", err)
+	}
+}
+
+func (b *Bot) removeUserSubscription(userID int64) bool {
+	b.subMu.Lock()
+	if _, ok := b.subscriptions[userID]; !ok {
+		b.subMu.Unlock()
+		return false
+	}
+	delete(b.subscriptions, userID)
+	snapshot := copySubscriptions(b.subscriptions)
+	b.subMu.Unlock()
+
+	if err := b.writeSubscriptions(snapshot); err != nil {
+		b.log.Error("delete subscription failed", "path", b.cfg.SubscriptionsFile, "error", err)
+	}
+	return true
 }
 
 func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
@@ -611,6 +718,97 @@ func (b *Bot) sendMessageWithMarkupAndParseMode(ctx context.Context, chatID int6
 		return fmt.Errorf("telegram sendMessage failed: %s", result.Description)
 	}
 	return nil
+}
+
+func (b *Bot) runSubscriptionScheduler(ctx context.Context) {
+	b.sendDueSubscriptions(ctx, time.Now())
+
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			b.sendDueSubscriptions(ctx, now)
+		}
+	}
+}
+
+func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
+	if b.rates == nil {
+		return
+	}
+
+	location := b.subscriptionLocation
+	if location == nil {
+		location = time.Local
+	}
+	localNow := now.In(location)
+	due := b.dueSubscriptions(localNow)
+	if len(due) == 0 {
+		return
+	}
+
+	snapshot, err := b.rates.Get(ctx)
+	if err != nil {
+		b.log.Error("rates unavailable for subscriptions", "error", err)
+		return
+	}
+
+	for userID, subscription := range due {
+		reply, err := rateReply(subscription.From, subscription.To, snapshot)
+		if err != nil {
+			b.log.Error("subscription rate reply failed", "user_id", userID, "from", subscription.From, "to", subscription.To, "error", err)
+			continue
+		}
+		text := fmt.Sprintf("Ежедневный курс %s -> %s\n\n%s", subscription.From, subscription.To, reply)
+		if err := b.sendMessage(ctx, subscription.ChatID, text); err != nil {
+			b.log.Error("send subscription failed", "user_id", userID, "chat_id", subscription.ChatID, "error", err)
+			continue
+		}
+		b.markSubscriptionSent(userID, subscription, subscriptionDate(localNow))
+	}
+}
+
+func (b *Bot) dueSubscriptions(now time.Time) map[int64]dailySubscription {
+	today := subscriptionDate(now)
+	b.subMu.RLock()
+	defer b.subMu.RUnlock()
+
+	due := map[int64]dailySubscription{}
+	for userID, subscription := range b.subscriptions {
+		subscription = normalizeSubscription(subscription)
+		if subscription.ChatID == 0 || subscription.Time == "" || subscription.LastSentDate == today {
+			continue
+		}
+		if dailyTimePassed(subscription.Time, now) {
+			due[userID] = subscription
+		}
+	}
+	return due
+}
+
+func (b *Bot) markSubscriptionSent(userID int64, sent dailySubscription, date string) {
+	b.subMu.Lock()
+	current, ok := b.subscriptions[userID]
+	if !ok {
+		b.subMu.Unlock()
+		return
+	}
+	current = normalizeSubscription(current)
+	if current.ChatID != sent.ChatID || current.From != sent.From || current.To != sent.To || current.Time != sent.Time {
+		b.subMu.Unlock()
+		return
+	}
+	current.LastSentDate = date
+	b.subscriptions[userID] = current
+	snapshot := copySubscriptions(b.subscriptions)
+	b.subMu.Unlock()
+
+	if err := b.writeSubscriptions(snapshot); err != nil {
+		b.log.Error("mark subscription sent failed", "path", b.cfg.SubscriptionsFile, "error", err)
+	}
 }
 
 func (b *Bot) answerCallbackQuery(ctx context.Context, callbackQueryID, text string) error {
@@ -709,6 +907,18 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+}
+
+func loadSubscriptionLocation(name string) (*time.Location, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "local") {
+		return time.Local, nil
+	}
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		return time.Local, err
+	}
+	return location, nil
 }
 
 func parseModifierPercent(raw string) (float64, error) {
@@ -873,6 +1083,67 @@ func parseRateRequest(text string, s session) (rateRequest, error) {
 	default:
 		return rateRequest{From: codes[0], To: codes[1]}, nil
 	}
+}
+
+func parseSubscription(text string, s session) (dailySubscription, error) {
+	s = normalizeSession(s, "", "")
+	args := commandArgs(text)
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return dailySubscription{}, errors.New("Укажите время: /subscribe 09:00 или /subscribe 09:00 USD RUB.")
+	}
+
+	dailyTime, err := parseDailyTime(fields[0])
+	if err != nil {
+		return dailySubscription{}, errors.New("Время должно быть в формате HH:MM, например /subscribe 09:00.")
+	}
+
+	currencyText := strings.Join(fields[1:], " ")
+	if unknown := firstUnknownCurrencyCodeToken(currencyText); unknown != "" {
+		return dailySubscription{}, fmt.Errorf("Не знаю валюту %s. Посмотрите доступные варианты через /list.", unknown)
+	}
+	codes := currencyCodesFromText(currencyText)
+
+	from := s.From
+	to := s.To
+	switch len(codes) {
+	case 0:
+	case 1:
+		from = codes[0]
+	default:
+		from = codes[0]
+		to = codes[1]
+	}
+
+	return dailySubscription{From: from, To: to, Time: dailyTime}, nil
+}
+
+func parseDailyTime(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	hourRaw, minuteRaw, ok := strings.Cut(raw, ":")
+	if !ok {
+		return "", errors.New("invalid daily time")
+	}
+	hour, err := strconv.Atoi(strings.TrimSpace(hourRaw))
+	if err != nil {
+		return "", err
+	}
+	minute, err := strconv.Atoi(strings.TrimSpace(minuteRaw))
+	if err != nil {
+		return "", err
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return "", errors.New("invalid daily time")
+	}
+	return fmt.Sprintf("%02d:%02d", hour, minute), nil
+}
+
+func dailyTimePassed(dailyTime string, now time.Time) bool {
+	return now.Format("15:04") >= dailyTime
+}
+
+func subscriptionDate(now time.Time) string {
+	return now.Format("2006-01-02")
 }
 
 func applyPercent(value, percent float64) float64 {
@@ -1351,12 +1622,80 @@ func (b *Bot) writeSessions(sessions map[int64]session) error {
 	return os.Rename(tmpFile, b.cfg.UserSettingsFile)
 }
 
+func (b *Bot) loadSubscriptions() error {
+	if strings.TrimSpace(b.cfg.SubscriptionsFile) == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(b.cfg.SubscriptionsFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	var subscriptions map[int64]dailySubscription
+	if err := json.Unmarshal(raw, &subscriptions); err != nil {
+		return err
+	}
+
+	b.subMu.Lock()
+	for userID, subscription := range subscriptions {
+		subscription = normalizeSubscription(subscription)
+		if subscription.ChatID == 0 || subscription.Time == "" {
+			continue
+		}
+		b.subscriptions[userID] = subscription
+	}
+	b.subMu.Unlock()
+	return nil
+}
+
+func (b *Bot) writeSubscriptions(subscriptions map[int64]dailySubscription) error {
+	if strings.TrimSpace(b.cfg.SubscriptionsFile) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(b.cfg.SubscriptionsFile), 0o755); err != nil {
+		return err
+	}
+
+	raw, err := json.MarshalIndent(subscriptions, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	tmpFile := b.cfg.SubscriptionsFile + ".tmp"
+	if err := os.WriteFile(tmpFile, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpFile, b.cfg.SubscriptionsFile)
+}
+
 func copySessions(sessions map[int64]session) map[int64]session {
 	result := make(map[int64]session, len(sessions))
 	for userID, s := range sessions {
 		result[userID] = s
 	}
 	return result
+}
+
+func copySubscriptions(subscriptions map[int64]dailySubscription) map[int64]dailySubscription {
+	result := make(map[int64]dailySubscription, len(subscriptions))
+	for userID, subscription := range subscriptions {
+		result[userID] = subscription
+	}
+	return result
+}
+
+func normalizeSubscription(subscription dailySubscription) dailySubscription {
+	subscription.From = strings.ToUpper(strings.TrimSpace(subscription.From))
+	subscription.To = strings.ToUpper(strings.TrimSpace(subscription.To))
+	if dailyTime, err := parseDailyTime(subscription.Time); err == nil {
+		subscription.Time = dailyTime
+	} else {
+		subscription.Time = ""
+	}
+	return subscription
 }
 
 func botCommands() []botCommand {
@@ -1368,6 +1707,9 @@ func botCommands() []botCommand {
 		{Command: "to", Description: "выбрать валюту результата"},
 		{Command: "swap", Description: "поменять валюты местами"},
 		{Command: "rate", Description: "текущий курс пары"},
+		{Command: "subscribe", Description: "ежедневный курс"},
+		{Command: "subscription", Description: "текущая подписка"},
+		{Command: "unsubscribe", Description: "отключить подписку"},
 		{Command: "with", Description: "кнопки перевода в валюты"},
 		{Command: "with_modify", Description: "модификаторы для кнопок"},
 		{Command: "inline_modify", Description: "модификаторы для явных валют"},

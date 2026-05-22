@@ -5,7 +5,7 @@ Telegram-бот на Go, который конвертирует суммы ме
 ## Возможности
 
 - whitelist пользователей через `TELEGRAM_ALLOWED_USER_IDS`; если переменная пустая, бот доступен всем
-- команды `/from USD`, `/to EUR`, `/swap`, `/rate USD EUR`, `/with USD EUR RUB`, `/with_modify yes`, `/inline_modify yes`, `/multi 1000`, `/round auto`, `/modify_from 1.5`, `/modify_to 1.5`, `/reset`, `/delete`, `/settings`, `/help`, `/list`
+- команды `/from USD`, `/to EUR`, `/swap`, `/rate USD EUR`, `/subscribe 09:00 USD RUB`, `/subscription`, `/unsubscribe`, `/with USD EUR RUB`, `/with_modify yes`, `/inline_modify yes`, `/multi 1000`, `/round auto`, `/modify_from 1.5`, `/modify_to 1.5`, `/reset`, `/delete`, `/settings`, `/help`, `/list`
 - inline mode: `@your_bot 100 usd rub`
 - ввод суммы свободным текстом: `12 345,67 usd` -> `12345.67`
 - умножение количества на цену в строке: `100х9`, `100 x 9`, `100 * 9`
@@ -15,8 +15,10 @@ Telegram-бот на Go, который конвертирует суммы ме
 - итоговая сумма в ответе выделяется жирным, рядом показывается точный курс за 1 единицу и удобный номинал для мелких курсов
 - ввод нескольких сумм с новой строки: бот сложит их и переведет итог
 - курсы валют из официального XML ЦБ РФ
+- ежедневная подписка на курс валютной пары в заданное время
 - файловый кеш курсов на 60 минут
 - сохранение пользовательских настроек в `data/user_settings.json`
+- сохранение подписок в `data/subscriptions.json`
 - graceful shutdown по `SIGINT`/`SIGTERM`
 - Docker multi-stage build и `restart: unless-stopped` в Compose
 
@@ -37,6 +39,8 @@ DEFAULT_FROM=USD
 DEFAULT_TO=RUB
 RATES_CACHE_FILE=/app/data/rates_cache.json
 USER_SETTINGS_FILE=/app/data/user_settings.json
+SUBSCRIPTIONS_FILE=/app/data/subscriptions.json
+SUBSCRIPTION_TIMEZONE=Asia/Tashkent
 CBR_DAILY_URLS=https://www.cbr.ru/scripts/XML_daily.asp
 ```
 
@@ -61,6 +65,20 @@ sudo chown -R 10001:10001 data
 
 ```bash
 docker compose up -d --build
+```
+
+## Деплой
+
+Для обновления уже развернутого бота используйте:
+
+```bash
+./deploy.sh
+```
+
+Скрипт делает `git pull --ff-only`, пересобирает образ и перезапускает сервисы через Docker Compose:
+
+```bash
+docker compose up -d --build --force-recreate --remove-orphans
 ```
 
 Если настройки не сохраняются, проверьте логи:
@@ -133,6 +151,10 @@ docker compose restart bot
 `/settings` показывает текущую валютную пару, время обновления курсов, множитель и процентные модификаторы.
 
 `/rate USD RUB` показывает текущий курс пары без конвертации суммы. Можно писать алиасами: `/rate $ руб`, `/rate сум евро`. Если валюты не указаны, используется текущая пара из настроек.
+
+`/subscribe 09:00` включает ежедневную отправку курса текущей пары из настроек. Можно указать пару явно: `/subscribe 09:00 USD RUB`. Время считается в timezone из `SUBSCRIPTION_TIMEZONE`. Если бот был выключен в момент отправки, после запуска он отправит курс за текущий день, если время уже наступило.
+
+`/subscription` показывает текущую подписку, а `/unsubscribe` отключает ее. Также можно отключить подписку через `/subscribe off`.
 
 `/swap` меняет исходную и итоговую валюты местами. Например, было `USD -> RUB`, станет `RUB -> USD`.
 
