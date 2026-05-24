@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Config struct {
@@ -123,7 +124,8 @@ func loadDotEnv(path string) error {
 
 func parseUserIDs(envName, raw string) (map[int64]struct{}, error) {
 	result := map[int64]struct{}{}
-	for _, part := range strings.Split(raw, ",") {
+	raw = stripInlineComment(raw)
+	for _, part := range strings.FieldsFunc(raw, isUserIDSeparator) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -135,6 +137,15 @@ func parseUserIDs(envName, raw string) (map[int64]struct{}, error) {
 		result[id] = struct{}{}
 	}
 	return result, nil
+}
+
+func stripInlineComment(value string) string {
+	value, _, _ = strings.Cut(value, "#")
+	return value
+}
+
+func isUserIDSeparator(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
 }
 
 func valueOrDefault(value, fallback string) string {
