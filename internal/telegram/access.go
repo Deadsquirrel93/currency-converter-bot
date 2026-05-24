@@ -42,9 +42,6 @@ func (b *Bot) whoamiText(userID int64) string {
 }
 
 func (b *Bot) showBlockedUserMessage(ctx context.Context, chatID, userID int64, text string) {
-	if text != "" && !isCommand(text, "/start") && !isCommand(text, "/help") && !isCommand(text, "/whoami") {
-		return
-	}
 	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Доступ к боту ограничен.\nВаш Telegram ID: %d\nПередайте этот ID администратору.", userID))
 }
 

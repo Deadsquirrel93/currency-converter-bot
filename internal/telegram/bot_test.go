@@ -434,7 +434,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "whoami", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "whoami", "allow", "disallow", "allowed", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
