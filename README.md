@@ -4,8 +4,9 @@ Telegram-бот на Go, который конвертирует суммы ме
 
 ## Возможности
 
-- whitelist пользователей через `TELEGRAM_ALLOWED_USER_IDS`; если переменная пустая, бот доступен всем
-- команды `/from USD`, `/to EUR`, `/swap`, `/rate USD EUR`, `/subscribe 09:00 USD RUB`, `/subscription`, `/unsubscribe`, `/with USD EUR RUB`, `/with_modify yes`, `/inline_modify yes`, `/multi 1000`, `/round auto`, `/modify_from 1.5`, `/modify_to 1.5`, `/reset`, `/delete`, `/settings`, `/help`, `/list`
+- whitelist пользователей через `TELEGRAM_ALLOWED_USER_IDS` и runtime-файл `ALLOWED_USERS_FILE`; если админы, env whitelist и runtime whitelist пустые, бот доступен всем
+- админы через `TELEGRAM_ADMIN_USER_IDS`: команды `/allow`, `/disallow`, `/allowed` добавляют и удаляют пользователей по Telegram ID без деплоя
+- команды `/from USD`, `/to EUR`, `/swap`, `/rate USD EUR`, `/subscribe 09:00 USD RUB`, `/subscription`, `/unsubscribe`, `/with USD EUR RUB`, `/with_modify yes`, `/inline_modify yes`, `/multi 1000`, `/round auto`, `/modify_from 1.5`, `/modify_to 1.5`, `/reset`, `/delete`, `/settings`, `/whoami`, `/help`, `/list`
 - inline mode: `@your_bot 100 usd rub`
 - ввод суммы свободным текстом: `12 345,67 usd` -> `12345.67`
 - умножение количества на цену в строке: `100х9`, `100 x 9`, `100 * 9`
@@ -34,23 +35,26 @@ cp .env.example .env
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+TELEGRAM_ADMIN_USER_IDS=YOUR_TELEGRAM_USER_ID
 TELEGRAM_ALLOWED_USER_IDS=YOUR_TELEGRAM_USER_ID,ANOTHER_TELEGRAM_USER_ID
 DEFAULT_FROM=USD
 DEFAULT_TO=RUB
 RATES_CACHE_FILE=/app/data/rates_cache.json
 USER_SETTINGS_FILE=/app/data/user_settings.json
+ALLOWED_USERS_FILE=/app/data/allowed_users.json
 SUBSCRIPTIONS_FILE=/app/data/subscriptions.json
 SUBSCRIPTION_TIMEZONE=Asia/Tashkent
 CBR_DAILY_URLS=https://www.cbr.ru/scripts/XML_daily.asp
 ```
 
-Чтобы сделать бота публичным для всех пользователей Telegram, оставьте whitelist пустым:
+Чтобы сделать бота публичным для всех пользователей Telegram, оставьте пустыми админов, env whitelist и runtime whitelist:
 
 ```dotenv
+TELEGRAM_ADMIN_USER_IDS=
 TELEGRAM_ALLOWED_USER_IDS=
 ```
 
-Если whitelist задан, обычные сообщения, кнопки и inline mode будут работать только для перечисленных Telegram ID.
+Если задан `TELEGRAM_ADMIN_USER_IDS`, `TELEGRAM_ALLOWED_USER_IDS` или в `ALLOWED_USERS_FILE` есть пользователи, обычные сообщения, кнопки и inline mode будут работать только для админов и разрешенных Telegram ID. Админы всегда имеют доступ.
 
 3. Подготовьте папку для кеша курсов и пользовательских настроек:
 
@@ -142,11 +146,23 @@ docker compose restart bot
 @your_bot 100 usd rub
 ```
 
-Если whitelist пустой, inline mode доступен всем. Если whitelist задан, inline-ответы получат только разрешенные Telegram ID.
+Если списки доступа пустые, inline mode доступен всем. Если задан админ, env whitelist или runtime whitelist, inline-ответы получат только разрешенные Telegram ID.
 
-Выбранные пользователями настройки сохраняются в `data/user_settings.json`. В Docker Compose папка `./data` подключена как volume, поэтому настройки сохраняются после пересборки образа и перезапуска контейнера.
+Выбранные пользователями настройки сохраняются в `data/user_settings.json`. Пользователи, добавленные админом через `/allow`, сохраняются в `data/allowed_users.json`. В Docker Compose папка `./data` подключена как volume, поэтому настройки и runtime whitelist сохраняются после пересборки образа и перезапуска контейнера.
 
 `/help` показывает справку, а `/list` возвращает список поддерживаемых популярных валют с кодом, названием и страной.
+
+`/whoami` показывает числовой Telegram ID пользователя. Если доступ ограничен, пользователь может отправить `/whoami` или `/start` и передать ID администратору.
+
+Админские команды:
+
+```text
+/allow 123456789
+/disallow 123456789
+/allowed
+```
+
+`/allow` добавляет пользователя в runtime whitelist без деплоя, `/disallow` удаляет только пользователей, добавленных через `/allow`, а `/allowed` показывает админов, env whitelist и runtime whitelist. Добавление по `@username` намеренно не поддерживается: username может измениться, а Telegram Bot API не гарантирует получение числового user ID по произвольному username.
 
 `/settings` показывает текущую валютную пару, время обновления курсов, множитель и процентные модификаторы.
 

@@ -434,7 +434,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "whoami", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
@@ -581,6 +581,97 @@ func TestBotPersistsSubscriptions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("restored subscription = %+v, want %+v", got, want)
+	}
+}
+
+func TestBotAccessAllowsEveryoneWhenNoRestrictions(t *testing.T) {
+	bot := New(config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !bot.isAllowed(42) {
+		t.Fatal("isAllowed() = false, want true when access lists are empty")
+	}
+}
+
+func TestBotAccessAllowsAdminsAndDynamicUsers(t *testing.T) {
+	bot := New(config.Config{
+		AdminUsers:   map[int64]struct{}{1: {}},
+		AllowedUsers: map[int64]struct{}{2: {}},
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if !bot.isAllowed(1) {
+		t.Fatal("admin must be allowed")
+	}
+	if !bot.isAllowed(2) {
+		t.Fatal("env whitelist user must be allowed")
+	}
+	if bot.isAllowed(3) {
+		t.Fatal("unknown user must be blocked in restricted mode")
+	}
+
+	added, already := bot.addAllowedUserIDs([]int64{3, 2})
+	if !reflect.DeepEqual(added, []int64{3}) {
+		t.Fatalf("added = %v, want [3]", added)
+	}
+	if !reflect.DeepEqual(already, []int64{2}) {
+		t.Fatalf("already = %v, want [2]", already)
+	}
+	if !bot.isAllowed(3) {
+		t.Fatal("dynamic whitelist user must be allowed")
+	}
+}
+
+func TestBotPersistsAllowedUsers(t *testing.T) {
+	allowedUsersFile := filepath.Join(t.TempDir(), "allowed_users.json")
+	cfg := config.Config{
+		AdminUsers:       map[int64]struct{}{1: {}},
+		AllowedUsersFile: allowedUsersFile,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	bot := New(cfg, nil, logger)
+	bot.addAllowedUserIDs([]int64{42, 7, 42})
+
+	raw, err := os.ReadFile(allowedUsersFile)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", allowedUsersFile, err)
+	}
+	if string(raw) != "[\n  7,\n  42\n]" {
+		t.Fatalf("allowed users file = %q", string(raw))
+	}
+
+	restarted := New(cfg, nil, logger)
+	if !restarted.isAllowed(7) || !restarted.isAllowed(42) {
+		t.Fatal("allowed users were not restored")
+	}
+	if restarted.isAllowed(8) {
+		t.Fatal("unknown user must be blocked when admin restricted mode is enabled")
+	}
+}
+
+func TestBotRemovesOnlyDynamicAllowedUsers(t *testing.T) {
+	bot := New(config.Config{
+		AdminUsers:   map[int64]struct{}{1: {}},
+		AllowedUsers: map[int64]struct{}{2: {}},
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bot.addAllowedUserIDs([]int64{3})
+
+	removed, protected, missing := bot.removeAllowedUserIDs([]int64{1, 2, 3, 4})
+	if !reflect.DeepEqual(removed, []int64{3}) {
+		t.Fatalf("removed = %v, want [3]", removed)
+	}
+	if !reflect.DeepEqual(protected, []int64{1, 2}) {
+		t.Fatalf("protected = %v, want [1 2]", protected)
+	}
+	if !reflect.DeepEqual(missing, []int64{4}) {
+		t.Fatalf("missing = %v, want [4]", missing)
+	}
+	if bot.isAllowed(3) {
+		t.Fatal("removed dynamic user must be blocked")
+	}
+}
+
+func TestParseTelegramUserIDArgsRejectsUsername(t *testing.T) {
+	if _, err := parseTelegramUserIDArgs("@username"); err == nil {
+		t.Fatal("parseTelegramUserIDArgs() error = nil, want error")
 	}
 }
 

@@ -12,11 +12,13 @@ import (
 
 type Config struct {
 	TelegramToken        string
+	AdminUsers           map[int64]struct{}
 	AllowedUsers         map[int64]struct{}
 	DefaultFrom          string
 	DefaultTo            string
 	CacheFile            string
 	UserSettingsFile     string
+	AllowedUsersFile     string
 	SubscriptionsFile    string
 	SubscriptionTimezone string
 	CacheTTL             time.Duration
@@ -29,11 +31,13 @@ func Load(path string) (Config, error) {
 
 	cfg := Config{
 		TelegramToken:        strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		AdminUsers:           map[int64]struct{}{},
 		AllowedUsers:         map[int64]struct{}{},
 		DefaultFrom:          upperOrDefault(os.Getenv("DEFAULT_FROM"), "USD"),
 		DefaultTo:            upperOrDefault(os.Getenv("DEFAULT_TO"), "RUB"),
 		CacheFile:            valueOrDefault(os.Getenv("RATES_CACHE_FILE"), "data/rates_cache.json"),
 		UserSettingsFile:     valueOrDefault(os.Getenv("USER_SETTINGS_FILE"), "data/user_settings.json"),
+		AllowedUsersFile:     valueOrDefault(os.Getenv("ALLOWED_USERS_FILE"), "data/allowed_users.json"),
 		SubscriptionsFile:    valueOrDefault(os.Getenv("SUBSCRIPTIONS_FILE"), "data/subscriptions.json"),
 		SubscriptionTimezone: valueOrDefault(os.Getenv("SUBSCRIPTION_TIMEZONE"), "Asia/Tashkent"),
 		CBRDailyURL:          valueOrDefault(os.Getenv("CBR_DAILY_URLS"), valueOrDefault(os.Getenv("CBR_DAILY_URL"), "https://www.cbr.ru/scripts/XML_daily.asp")),
@@ -44,7 +48,13 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}
 
-	users, err := parseAllowedUsers(os.Getenv("TELEGRAM_ALLOWED_USER_IDS"))
+	admins, err := parseUserIDs("TELEGRAM_ADMIN_USER_IDS", os.Getenv("TELEGRAM_ADMIN_USER_IDS"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.AdminUsers = admins
+
+	users, err := parseUserIDs("TELEGRAM_ALLOWED_USER_IDS", os.Getenv("TELEGRAM_ALLOWED_USER_IDS"))
 	if err != nil {
 		return Config{}, err
 	}
@@ -64,8 +74,16 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func (c Config) IsAdmin(userID int64) bool {
+	_, ok := c.AdminUsers[userID]
+	return ok
+}
+
 func (c Config) IsAllowed(userID int64) bool {
-	if len(c.AllowedUsers) == 0 {
+	if c.IsAdmin(userID) {
+		return true
+	}
+	if len(c.AllowedUsers) == 0 && len(c.AdminUsers) == 0 {
 		return true
 	}
 	_, ok := c.AllowedUsers[userID]
@@ -103,7 +121,7 @@ func loadDotEnv(path string) error {
 	return scanner.Err()
 }
 
-func parseAllowedUsers(raw string) (map[int64]struct{}, error) {
+func parseUserIDs(envName, raw string) (map[int64]struct{}, error) {
 	result := map[int64]struct{}{}
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
@@ -112,7 +130,7 @@ func parseAllowedUsers(raw string) (map[int64]struct{}, error) {
 		}
 		id, err := strconv.ParseInt(part, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("parse TELEGRAM_ALLOWED_USER_IDS value %q: %w", part, err)
+			return nil, fmt.Errorf("parse %s value %q: %w", envName, part, err)
 		}
 		result[id] = struct{}{}
 	}

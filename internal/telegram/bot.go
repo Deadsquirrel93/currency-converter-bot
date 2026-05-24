@@ -29,6 +29,8 @@ type Bot struct {
 	log                  *slog.Logger
 	mu                   sync.RWMutex
 	sessions             map[int64]session
+	accessMu             sync.RWMutex
+	allowedUsers         map[int64]struct{}
 	subMu                sync.RWMutex
 	subscriptions        map[int64]dailySubscription
 	subscriptionLocation *time.Location
@@ -96,11 +98,15 @@ func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot 
 		client:               &http.Client{Timeout: 70 * time.Second},
 		log:                  logger,
 		sessions:             map[int64]session{},
+		allowedUsers:         map[int64]struct{}{},
 		subscriptions:        map[int64]dailySubscription{},
 		subscriptionLocation: subscriptionLocation,
 	}
 	if err := b.loadSessions(); err != nil {
 		b.log.Warn("load user settings failed", "error", err)
+	}
+	if err := b.loadAllowedUsers(); err != nil {
+		b.log.Warn("load allowed users failed", "error", err)
 	}
 	if err := b.loadSubscriptions(); err != nil {
 		b.log.Warn("load subscriptions failed", "error", err)
@@ -157,12 +163,13 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
-	if !b.cfg.IsAllowed(userID) {
+	text := strings.TrimSpace(update.Message.Text)
+	if !b.isAllowed(userID) {
 		b.log.Warn("blocked user", "user_id", userID, "chat_id", chatID)
+		b.showBlockedUserMessage(ctx, chatID, userID, text)
 		return
 	}
 
-	text := strings.TrimSpace(update.Message.Text)
 	if text == "" {
 		_ = b.sendMessage(ctx, chatID, "Пришлите сумму числом или используйте /from USD и /to RUB.")
 		return
@@ -171,6 +178,14 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 	switch {
 	case isCommand(text, "/start"), isCommand(text, "/help"):
 		_ = b.sendMessage(ctx, chatID, b.helpText(userID))
+	case isCommand(text, "/whoami"):
+		_ = b.sendMessage(ctx, chatID, b.whoamiText(userID))
+	case isCommand(text, "/allow"):
+		b.allowUsers(ctx, chatID, userID, text)
+	case isCommand(text, "/disallow"):
+		b.disallowUsers(ctx, chatID, userID, text)
+	case isCommand(text, "/allowed"):
+		b.showAllowedUsers(ctx, chatID, userID)
 	case isCommand(text, "/list"):
 		_ = b.sendMessage(ctx, chatID, supportedCurrenciesText())
 	case isCommand(text, "/settings"):
@@ -217,7 +232,7 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 		return
 	}
 	userID := query.From.ID
-	if !b.cfg.IsAllowed(userID) {
+	if !b.isAllowed(userID) {
 		b.log.Warn("blocked user callback", "user_id", userID)
 		_ = b.answerCallbackQuery(ctx, query.ID, "Нет доступа")
 		return
@@ -257,7 +272,7 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 		return
 	}
 	userID := query.From.ID
-	if !b.cfg.IsAllowed(userID) {
+	if !b.isAllowed(userID) {
 		b.log.Warn("blocked user inline query", "user_id", userID)
 		_ = b.answerInlineQuery(ctx, query.ID, nil)
 		return
@@ -592,7 +607,12 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	return fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если whitelist пустой, я доступен всем; если задан, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/subscribe 09:00 - ежедневный курс текущей пары\n/subscribe 09:00 USD RUB - ежедневный курс выбранной пары\n/subscription - показать подписку\n/unsubscribe - отключить подписку\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/inline_modify yes - учитывать modify_from и modify_to для явных валют в тексте\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/list - список поддерживаемых валют\n/help - эта справка\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Когда валюты указаны в тексте явно, /multi не применяется, а modify_from и modify_to применяются только после /inline_modify yes. Для покупок можно писать 100х9, 100 x 9 или 100 * 9; русская и английская х/x поддерживаются. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub.", s.From, s.To)
+	text := fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если списки доступа пустые, я доступен всем; если задан админ или whitelist, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/subscribe 09:00 - ежедневный курс текущей пары\n/subscribe 09:00 USD RUB - ежедневный курс выбранной пары\n/subscription - показать подписку\n/unsubscribe - отключить подписку\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/inline_modify yes - учитывать modify_from и modify_to для явных валют в тексте\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/whoami - показать ваш Telegram ID\n/list - список поддерживаемых валют\n/help - эта справка", s.From, s.To)
+	if b.cfg.IsAdmin(userID) {
+		text += "\n\nАдмин-команды:\n/allow 123456789 - разрешить пользователя по Telegram ID\n/disallow 123456789 - убрать пользователя из runtime whitelist\n/allowed - показать админов и разрешенных пользователей"
+	}
+	text += "\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Когда валюты указаны в тексте явно, /multi не применяется, а modify_from и modify_to применяются только после /inline_modify yes. Для покупок можно писать 100х9, 100 x 9 или 100 * 9; русская и английская х/x поддерживаются. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub."
+	return text
 }
 
 func (b *Bot) getSession(userID int64) session {
@@ -1702,6 +1722,7 @@ func botCommands() []botCommand {
 	return []botCommand{
 		{Command: "start", Description: "запустить бота"},
 		{Command: "help", Description: "справка по командам"},
+		{Command: "whoami", Description: "показать ваш Telegram ID"},
 		{Command: "settings", Description: "текущие настройки"},
 		{Command: "from", Description: "выбрать исходную валюту"},
 		{Command: "to", Description: "выбрать валюту результата"},
