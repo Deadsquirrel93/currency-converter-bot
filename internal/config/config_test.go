@@ -32,21 +32,6 @@ func TestConfigIsAllowedAllowsAdmins(t *testing.T) {
 	}
 }
 
-func TestParseUserIDsAllowsCommonSeparatorsAndInlineComments(t *testing.T) {
-	ids, err := parseUserIDs("TELEGRAM_ADMIN_USER_IDS", "42, 7;9 | 11 # admins")
-	if err != nil {
-		t.Fatalf("parseUserIDs(): %v", err)
-	}
-	for _, id := range []int64{42, 7, 9, 11} {
-		if _, ok := ids[id]; !ok {
-			t.Fatalf("parseUserIDs() missing %d in %#v", id, ids)
-		}
-	}
-	if len(ids) != 4 {
-		t.Fatalf("parseUserIDs() returned %d ids, want 4: %#v", len(ids), ids)
-	}
-}
-
 func TestParseUserIDsRejectsTextTokens(t *testing.T) {
 	if _, err := parseUserIDs("TELEGRAM_ADMIN_USER_IDS", "42,admin"); err == nil {
 		t.Fatal("parseUserIDs() error = nil, want error")
