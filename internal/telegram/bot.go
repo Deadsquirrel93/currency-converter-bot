@@ -1245,6 +1245,7 @@ type subscriptionRateHistory struct {
 	Yesterday   *subscriptionRatePoint
 	WeekAgo     *subscriptionRatePoint
 	MonthMin    *subscriptionRatePoint
+	MonthMax    *subscriptionRatePoint
 }
 
 type subscriptionHistoricalSnapshot struct {
@@ -1280,6 +1281,10 @@ func subscriptionRateHistoryFromSnapshots(from, to string, snapshots []subscript
 			candidate := *point
 			history.MonthMin = &candidate
 		}
+		if history.MonthMax == nil || point.Rate > history.MonthMax.Rate {
+			candidate := *point
+			history.MonthMax = &candidate
+		}
 	}
 
 	return history
@@ -1312,9 +1317,27 @@ func formatSubscriptionRateHistory(from, to string, history subscriptionRateHist
 	if history.MonthMin == nil {
 		lines = append(lines, "Минимум за 30 дней: нет данных")
 	} else {
-		lines = append(lines, fmt.Sprintf("Минимум за 30 дней: %s %s (%s)", formatRate(history.MonthMin.Rate), to, history.MonthMin.Date.Format("2006-01-02")))
+		lines = append(lines, fmt.Sprintf("Минимум за 30 дней: %s", formatRateExtreme(history.CurrentRate, history.MonthMin, to)))
+	}
+	if history.MonthMax == nil {
+		lines = append(lines, "Максимум за 30 дней: нет данных")
+	} else {
+		lines = append(lines, fmt.Sprintf("Максимум за 30 дней: %s", formatRateExtreme(history.CurrentRate, history.MonthMax, to)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatRateExtreme(current float64, point *subscriptionRatePoint, to string) string {
+	if point == nil {
+		return "нет данных"
+	}
+	return fmt.Sprintf(
+		"%s %s (%s), сейчас %s",
+		formatRate(point.Rate),
+		to,
+		point.Date.Format("2006-01-02"),
+		formatRateDelta(current, point, to),
+	)
 }
 
 func formatRateDelta(current float64, point *subscriptionRatePoint, to string) string {

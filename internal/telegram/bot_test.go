@@ -373,7 +373,8 @@ func TestRateReplyWithHistory(t *testing.T) {
 		"Динамика USD -> RUB:",
 		"Со вчера: +2,00 RUB (+2,04%)",
 		"За 7 дней: -5,00 RUB (-4,76%)",
-		"Минимум за 30 дней: 94,00 RUB (2026-05-04)",
+		"Минимум за 30 дней: 94,00 RUB (2026-05-04), сейчас +6,00 RUB (+6,38%)",
+		"Максимум за 30 дней: 105,00 RUB (2026-05-03), сейчас -5,00 RUB (-4,76%)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rateReplyWithHistory() must contain %q, got:\n%s", want, got)
@@ -396,13 +397,18 @@ func TestFormatSubscriptionRateHistory(t *testing.T) {
 			Date: time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC),
 			Rate: 95,
 		},
+		MonthMax: &subscriptionRatePoint{
+			Date: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Rate: 110,
+		},
 	})
 
 	for _, want := range []string{
 		"Динамика USD -> RUB:",
 		"Со вчера: +2,00 RUB (+2,04%)",
 		"За 7 дней: -5,00 RUB (-4,76%)",
-		"Минимум за 30 дней: 95,00 RUB (2026-04-20)",
+		"Минимум за 30 дней: 95,00 RUB (2026-04-20), сейчас +5,00 RUB (+5,26%)",
+		"Максимум за 30 дней: 110,00 RUB (2026-04-25), сейчас -10,00 RUB (-9,09%)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatSubscriptionRateHistory() must contain %q, got:\n%s", want, got)
@@ -436,6 +442,9 @@ func TestSubscriptionRateHistoryFromSnapshots(t *testing.T) {
 	}
 	if got.MonthMin == nil || got.MonthMin.Rate != 94 || !got.MonthMin.Date.Equal(baseDate.AddDate(0, 0, -6)) {
 		t.Fatalf("MonthMin = %+v, want rate 94 at %s", got.MonthMin, baseDate.AddDate(0, 0, -6))
+	}
+	if got.MonthMax == nil || got.MonthMax.Rate != 105 || !got.MonthMax.Date.Equal(baseDate.AddDate(0, 0, -7)) {
+		t.Fatalf("MonthMax = %+v, want rate 105 at %s", got.MonthMax, baseDate.AddDate(0, 0, -7))
 	}
 }
 
