@@ -775,6 +775,7 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 		b.log.Error("rates unavailable for subscriptions", "error", err)
 		return
 	}
+	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, localNow)
 
 	for userID, subscription := range due {
 		reply, err := rateReply(subscription.From, subscription.To, snapshot)
@@ -782,13 +783,38 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 			b.log.Error("subscription rate reply failed", "user_id", userID, "from", subscription.From, "to", subscription.To, "error", err)
 			continue
 		}
-		text := fmt.Sprintf("Ежедневный курс %s -> %s\n\n%s", subscription.From, subscription.To, reply)
+		history := subscriptionRateHistoryFromSnapshots(subscription.From, subscription.To, historicalSnapshots)
+		text := fmt.Sprintf("Ежедневный курс %s -> %s\n\n%s\n\n%s", subscription.From, subscription.To, reply, formatSubscriptionRateHistory(subscription.From, subscription.To, history))
 		if err := b.sendMessage(ctx, subscription.ChatID, text); err != nil {
 			b.log.Error("send subscription failed", "user_id", userID, "chat_id", subscription.ChatID, "error", err)
 			continue
 		}
 		b.markSubscriptionSent(userID, subscription, subscriptionDate(localNow))
 	}
+}
+
+func (b *Bot) subscriptionHistoricalSnapshots(ctx context.Context, current rates.Snapshot, localNow time.Time) []subscriptionHistoricalSnapshot {
+	localDate := startOfLocalDay(localNow)
+	snapshots := make([]subscriptionHistoricalSnapshot, 0, 30)
+	for daysAgo := 0; daysAgo < 30; daysAgo++ {
+		date := localDate.AddDate(0, 0, -daysAgo)
+		if daysAgo == 0 {
+			snapshots = append(snapshots, subscriptionHistoricalSnapshot{Date: date, Snapshot: current})
+			continue
+		}
+
+		snapshot, err := b.rates.GetForDate(ctx, date)
+		if err != nil {
+			b.log.Warn("historical rates unavailable for subscription", "date", date.Format("2006-01-02"), "error", err)
+		}
+		snapshots = append(snapshots, subscriptionHistoricalSnapshot{Date: date, Snapshot: snapshot, Err: err})
+	}
+	return snapshots
+}
+
+func startOfLocalDay(value time.Time) time.Time {
+	year, month, day := value.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, value.Location())
 }
 
 func (b *Bot) dueSubscriptions(now time.Time) map[int64]dailySubscription {
@@ -1197,6 +1223,103 @@ func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
 		convenientRateSuffix(to, from, reverse),
 		updatedAt,
 	), nil
+}
+
+type subscriptionRateHistory struct {
+	CurrentRate float64
+	Yesterday   *subscriptionRatePoint
+	WeekAgo     *subscriptionRatePoint
+	MonthMin    *subscriptionRatePoint
+}
+
+type subscriptionHistoricalSnapshot struct {
+	Date     time.Time
+	Snapshot rates.Snapshot
+	Err      error
+}
+
+type subscriptionRatePoint struct {
+	Date time.Time
+	Rate float64
+}
+
+func subscriptionRateHistoryFromSnapshots(from, to string, snapshots []subscriptionHistoricalSnapshot) subscriptionRateHistory {
+	if len(snapshots) == 0 {
+		return subscriptionRateHistory{}
+	}
+
+	currentRate, err := rates.Convert(1, from, to, snapshots[0].Snapshot)
+	if err != nil {
+		return subscriptionRateHistory{}
+	}
+	history := subscriptionRateHistory{CurrentRate: currentRate}
+	history.Yesterday = subscriptionRatePointFromSnapshot(from, to, snapshotAtOffset(snapshots, 1))
+	history.WeekAgo = subscriptionRatePointFromSnapshot(from, to, snapshotAtOffset(snapshots, 7))
+
+	for i := range snapshots {
+		point := subscriptionRatePointFromSnapshot(from, to, &snapshots[i])
+		if point == nil {
+			continue
+		}
+		if history.MonthMin == nil || point.Rate < history.MonthMin.Rate {
+			candidate := *point
+			history.MonthMin = &candidate
+		}
+	}
+
+	return history
+}
+
+func snapshotAtOffset(snapshots []subscriptionHistoricalSnapshot, daysAgo int) *subscriptionHistoricalSnapshot {
+	if daysAgo < 0 || daysAgo >= len(snapshots) {
+		return nil
+	}
+	return &snapshots[daysAgo]
+}
+
+func subscriptionRatePointFromSnapshot(from, to string, snapshot *subscriptionHistoricalSnapshot) *subscriptionRatePoint {
+	if snapshot == nil || snapshot.Err != nil {
+		return nil
+	}
+	rate, err := rates.Convert(1, from, to, snapshot.Snapshot)
+	if err != nil {
+		return nil
+	}
+	return &subscriptionRatePoint{Date: snapshot.Date, Rate: rate}
+}
+
+func formatSubscriptionRateHistory(from, to string, history subscriptionRateHistory) string {
+	lines := []string{
+		fmt.Sprintf("Динамика %s -> %s:", from, to),
+		fmt.Sprintf("Со вчера: %s", formatRateDelta(history.CurrentRate, history.Yesterday, to)),
+		fmt.Sprintf("За 7 дней: %s", formatRateDelta(history.CurrentRate, history.WeekAgo, to)),
+	}
+	if history.MonthMin == nil {
+		lines = append(lines, "Минимум за 30 дней: нет данных")
+	} else {
+		lines = append(lines, fmt.Sprintf("Минимум за 30 дней: %s %s (%s)", formatRate(history.MonthMin.Rate), to, history.MonthMin.Date.Format("2006-01-02")))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatRateDelta(current float64, point *subscriptionRatePoint, to string) string {
+	if point == nil || point.Rate == 0 {
+		return "нет данных"
+	}
+	delta := current - point.Rate
+	percent := delta / point.Rate * 100
+	return fmt.Sprintf("%s %s (%s)", formatSignedRate(delta), to, formatPercent(percent))
+}
+
+func formatSignedRate(value float64) string {
+	formatted := formatRate(math.Abs(value))
+	if value > 0 {
+		return "+" + formatted
+	}
+	if value < 0 {
+		return "-" + formatted
+	}
+	return formatted
 }
 
 func formatRate(value float64) string {

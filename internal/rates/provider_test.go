@@ -71,3 +71,35 @@ func TestProviderFallsBackToNextSourceURL(t *testing.T) {
 		t.Fatalf("USD value = %v, want 90.1234", snapshot.Rates["USD"].Value)
 	}
 }
+
+func TestProviderGetsSnapshotForDate(t *testing.T) {
+	var gotDateReq string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDateReq = r.URL.Query().Get("date_req")
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<ValCurs>
+	<Valute>
+		<CharCode>USD</CharCode>
+		<Nominal>1</Nominal>
+		<Name>Доллар США</Name>
+		<Value>91,2500</Value>
+	</Valute>
+</ValCurs>`))
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL+"?existing=1", t.TempDir()+"/rates.json", time.Hour)
+	provider.fetchRetries = 1
+
+	snapshot, err := provider.GetForDate(context.Background(), time.Date(2026, 5, 10, 14, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("GetForDate() error = %v", err)
+	}
+	if gotDateReq != "10/05/2026" {
+		t.Fatalf("date_req = %q, want 10/05/2026", gotDateReq)
+	}
+	if snapshot.Rates["USD"].Value != 91.25 {
+		t.Fatalf("USD value = %v, want 91.25", snapshot.Rates["USD"].Value)
+	}
+}

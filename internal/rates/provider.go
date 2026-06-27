@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,10 @@ func (p *Provider) Get(ctx context.Context) (Snapshot, error) {
 	}
 
 	return Snapshot{}, err
+}
+
+func (p *Provider) GetForDate(ctx context.Context, date time.Time) (Snapshot, error) {
+	return p.fetchAnyCBRForDate(ctx, date)
 }
 
 func Convert(amount float64, from, to string, snapshot Snapshot) (float64, error) {
@@ -129,6 +134,40 @@ func (p *Provider) fetchAnyCBR(ctx context.Context) (Snapshot, error) {
 		}
 	}
 	return Snapshot{}, fmt.Errorf("all CBR sources failed: %s", strings.Join(failures, "; "))
+}
+
+func (p *Provider) fetchAnyCBRForDate(ctx context.Context, date time.Time) (Snapshot, error) {
+	var failures []string
+	for _, sourceURL := range p.sourceURLs {
+		datedURL, err := cbrURLForDate(sourceURL, date)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", sourceURL, err))
+			continue
+		}
+		for attempt := 1; attempt <= p.fetchRetries; attempt++ {
+			snapshot, err := p.fetchCBR(ctx, datedURL)
+			if err == nil {
+				return snapshot, nil
+			}
+			failures = append(failures, fmt.Sprintf("%s attempt %d: %v", datedURL, attempt, err))
+			if errorsIsContext(ctx.Err()) {
+				return Snapshot{}, ctx.Err()
+			}
+			sleepBeforeRetry(ctx, attempt)
+		}
+	}
+	return Snapshot{}, fmt.Errorf("all CBR sources failed: %s", strings.Join(failures, "; "))
+}
+
+func cbrURLForDate(sourceURL string, date time.Time) (string, error) {
+	parsed, err := url.Parse(sourceURL)
+	if err != nil {
+		return "", err
+	}
+	query := parsed.Query()
+	query.Set("date_req", date.Format("02/01/2006"))
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 func (p *Provider) fetchCBR(ctx context.Context, sourceURL string) (Snapshot, error) {

@@ -350,6 +350,71 @@ func TestRateReply(t *testing.T) {
 	}
 }
 
+func TestFormatSubscriptionRateHistory(t *testing.T) {
+	got := formatSubscriptionRateHistory("USD", "RUB", subscriptionRateHistory{
+		CurrentRate: 100,
+		Yesterday: &subscriptionRatePoint{
+			Date: time.Date(2026, 5, 9, 0, 0, 0, 0, time.UTC),
+			Rate: 98,
+		},
+		WeekAgo: &subscriptionRatePoint{
+			Date: time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC),
+			Rate: 105,
+		},
+		MonthMin: &subscriptionRatePoint{
+			Date: time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC),
+			Rate: 95,
+		},
+	})
+
+	for _, want := range []string{
+		"Динамика USD -> RUB:",
+		"Со вчера: +2,00 RUB (+2,04%)",
+		"За 7 дней: -5,00 RUB (-4,76%)",
+		"Минимум за 30 дней: 95,00 RUB (2026-04-20)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatSubscriptionRateHistory() must contain %q, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestSubscriptionRateHistoryFromSnapshots(t *testing.T) {
+	baseDate := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	snapshots := []subscriptionHistoricalSnapshot{
+		{Date: baseDate, Snapshot: testRateSnapshot(100)},
+		{Date: baseDate.AddDate(0, 0, -1), Snapshot: testRateSnapshot(98)},
+		{Date: baseDate.AddDate(0, 0, -2), Snapshot: testRateSnapshot(99)},
+		{Date: baseDate.AddDate(0, 0, -3), Snapshot: testRateSnapshot(97)},
+		{Date: baseDate.AddDate(0, 0, -4), Snapshot: testRateSnapshot(96)},
+		{Date: baseDate.AddDate(0, 0, -5), Snapshot: testRateSnapshot(95)},
+		{Date: baseDate.AddDate(0, 0, -6), Snapshot: testRateSnapshot(94)},
+		{Date: baseDate.AddDate(0, 0, -7), Snapshot: testRateSnapshot(105)},
+	}
+
+	got := subscriptionRateHistoryFromSnapshots("USD", "RUB", snapshots)
+
+	if got.CurrentRate != 100 {
+		t.Fatalf("CurrentRate = %v, want 100", got.CurrentRate)
+	}
+	if got.Yesterday == nil || got.Yesterday.Rate != 98 {
+		t.Fatalf("Yesterday = %+v, want rate 98", got.Yesterday)
+	}
+	if got.WeekAgo == nil || got.WeekAgo.Rate != 105 {
+		t.Fatalf("WeekAgo = %+v, want rate 105", got.WeekAgo)
+	}
+	if got.MonthMin == nil || got.MonthMin.Rate != 94 || !got.MonthMin.Date.Equal(baseDate.AddDate(0, 0, -6)) {
+		t.Fatalf("MonthMin = %+v, want rate 94 at %s", got.MonthMin, baseDate.AddDate(0, 0, -6))
+	}
+}
+
+func testRateSnapshot(usdRate float64) rates.Snapshot {
+	return rates.Snapshot{Rates: map[string]rates.Rate{
+		"RUB": {Code: "RUB", Nominal: 1, Value: 1},
+		"USD": {Code: "USD", Nominal: 1, Value: usdRate},
+	}}
+}
+
 func TestParseSubscription(t *testing.T) {
 	s := session{From: "USD", To: "RUB", Multiplier: 1}
 

@@ -1,4 +1,5 @@
 .env
 data/*.json
 bin/
+docs/
 .DS_Store
