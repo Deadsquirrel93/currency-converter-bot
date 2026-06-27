@@ -350,6 +350,37 @@ func TestRateReply(t *testing.T) {
 	}
 }
 
+func TestRateReplyWithHistory(t *testing.T) {
+	baseDate := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+	snapshots := []rateHistoricalSnapshot{
+		{Date: baseDate, Snapshot: testRateSnapshot(100)},
+		{Date: baseDate.AddDate(0, 0, -1), Snapshot: testRateSnapshot(98)},
+		{Date: baseDate.AddDate(0, 0, -2), Snapshot: testRateSnapshot(99)},
+		{Date: baseDate.AddDate(0, 0, -3), Snapshot: testRateSnapshot(97)},
+		{Date: baseDate.AddDate(0, 0, -4), Snapshot: testRateSnapshot(96)},
+		{Date: baseDate.AddDate(0, 0, -5), Snapshot: testRateSnapshot(95)},
+		{Date: baseDate.AddDate(0, 0, -6), Snapshot: testRateSnapshot(94)},
+		{Date: baseDate.AddDate(0, 0, -7), Snapshot: testRateSnapshot(105)},
+	}
+
+	got, err := rateReplyWithHistory("USD", "RUB", testRateSnapshot(100), snapshots)
+	if err != nil {
+		t.Fatalf("rateReplyWithHistory(): %v", err)
+	}
+	for _, want := range []string{
+		"Курс:",
+		"1 USD = 100,00 RUB",
+		"Динамика USD -> RUB:",
+		"Со вчера: +2,00 RUB (+2,04%)",
+		"За 7 дней: -5,00 RUB (-4,76%)",
+		"Минимум за 30 дней: 94,00 RUB (2026-05-04)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rateReplyWithHistory() must contain %q, got:\n%s", want, got)
+		}
+	}
+}
+
 func TestFormatSubscriptionRateHistory(t *testing.T) {
 	got := formatSubscriptionRateHistory("USD", "RUB", subscriptionRateHistory{
 		CurrentRate: 100,

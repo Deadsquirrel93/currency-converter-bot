@@ -524,7 +524,12 @@ func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 		return
 	}
 
-	reply, err := rateReply(request.From, request.To, snapshot)
+	location := b.subscriptionLocation
+	if location == nil {
+		location = time.Local
+	}
+	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, time.Now().In(location))
+	reply, err := rateReplyWithHistory(request.From, request.To, snapshot, historicalSnapshots)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте валюты.", err.Error()))
 		return
@@ -778,13 +783,12 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, localNow)
 
 	for userID, subscription := range due {
-		reply, err := rateReply(subscription.From, subscription.To, snapshot)
+		reply, err := rateReplyWithHistory(subscription.From, subscription.To, snapshot, historicalSnapshots)
 		if err != nil {
 			b.log.Error("subscription rate reply failed", "user_id", userID, "from", subscription.From, "to", subscription.To, "error", err)
 			continue
 		}
-		history := subscriptionRateHistoryFromSnapshots(subscription.From, subscription.To, historicalSnapshots)
-		text := fmt.Sprintf("Ежедневный курс %s -> %s\n\n%s\n\n%s", subscription.From, subscription.To, reply, formatSubscriptionRateHistory(subscription.From, subscription.To, history))
+		text := fmt.Sprintf("Ежедневный курс %s -> %s\n\n%s", subscription.From, subscription.To, reply)
 		if err := b.sendMessage(ctx, subscription.ChatID, text); err != nil {
 			b.log.Error("send subscription failed", "user_id", userID, "chat_id", subscription.ChatID, "error", err)
 			continue
@@ -1223,6 +1227,17 @@ func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
 		convenientRateSuffix(to, from, reverse),
 		updatedAt,
 	), nil
+}
+
+type rateHistoricalSnapshot = subscriptionHistoricalSnapshot
+
+func rateReplyWithHistory(from, to string, snapshot rates.Snapshot, historicalSnapshots []rateHistoricalSnapshot) (string, error) {
+	reply, err := rateReply(from, to, snapshot)
+	if err != nil {
+		return "", err
+	}
+	history := subscriptionRateHistoryFromSnapshots(from, to, historicalSnapshots)
+	return reply + "\n\n" + formatSubscriptionRateHistory(from, to, history), nil
 }
 
 type subscriptionRateHistory struct {
