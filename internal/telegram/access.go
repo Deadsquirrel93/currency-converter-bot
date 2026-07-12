@@ -32,17 +32,18 @@ func (b *Bot) isAllowed(userID int64) bool {
 }
 
 func (b *Bot) whoamiText(userID int64) string {
+	language := b.userLanguage(userID)
 	if b.cfg.IsAdmin(userID) {
-		return fmt.Sprintf("Ваш Telegram ID: %d\nРоль: админ", userID)
+		return fmt.Sprintf(tr(language, "Ваш Telegram ID: %d\nРоль: админ", "Your Telegram ID: %d\nRole: admin"), userID)
 	}
 	if b.isAllowed(userID) {
-		return fmt.Sprintf("Ваш Telegram ID: %d\nДоступ: разрешен", userID)
+		return fmt.Sprintf(tr(language, "Ваш Telegram ID: %d\nДоступ: разрешен", "Your Telegram ID: %d\nAccess: allowed"), userID)
 	}
-	return fmt.Sprintf("Ваш Telegram ID: %d\nДоступ: не разрешен", userID)
+	return fmt.Sprintf(tr(language, "Ваш Telegram ID: %d\nДоступ: не разрешен", "Your Telegram ID: %d\nAccess: not allowed"), userID)
 }
 
 func (b *Bot) showBlockedUserMessage(ctx context.Context, chatID, userID int64, text string) {
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Доступ к боту ограничен.\nВаш Telegram ID: %d\nПередайте этот ID администратору.", userID))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Доступ к боту ограничен / Bot access is restricted.\nTelegram ID: %d\nПередайте ID администратору / Send this ID to the administrator.", userID))
 }
 
 func (b *Bot) allowUsers(ctx context.Context, chatID, adminID int64, text string) {
@@ -52,17 +53,18 @@ func (b *Bot) allowUsers(ctx context.Context, chatID, adminID int64, text string
 
 	ids, err := parseTelegramUserIDArgs(commandArgs(text))
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, err.Error())
+		_ = b.sendMessage(ctx, chatID, tr(b.userLanguage(adminID), err.Error(), "Specify a numeric Telegram ID, for example /allow 123456789."))
 		return
 	}
 
 	added, already := b.addAllowedUserIDs(ids)
+	language := b.userLanguage(adminID)
 	parts := []string{}
 	if len(added) > 0 {
-		parts = append(parts, "Добавлены: "+formatIDs(added)+".")
+		parts = append(parts, tr(language, "Добавлены: ", "Added: ")+formatIDs(added)+".")
 	}
 	if len(already) > 0 {
-		parts = append(parts, "Уже были с доступом: "+formatIDs(already)+".")
+		parts = append(parts, tr(language, "Уже были с доступом: ", "Already allowed: ")+formatIDs(already)+".")
 	}
 	_ = b.sendMessage(ctx, chatID, strings.Join(parts, "\n"))
 }
@@ -74,20 +76,21 @@ func (b *Bot) disallowUsers(ctx context.Context, chatID, adminID int64, text str
 
 	ids, err := parseTelegramUserIDArgs(commandArgs(text))
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, err.Error())
+		_ = b.sendMessage(ctx, chatID, tr(b.userLanguage(adminID), err.Error(), "Specify a numeric Telegram ID, for example /disallow 123456789."))
 		return
 	}
 
 	removed, protected, missing := b.removeAllowedUserIDs(ids)
+	language := b.userLanguage(adminID)
 	parts := []string{}
 	if len(removed) > 0 {
-		parts = append(parts, "Удалены из runtime whitelist: "+formatIDs(removed)+".")
+		parts = append(parts, tr(language, "Удалены из runtime whitelist: ", "Removed from runtime whitelist: ")+formatIDs(removed)+".")
 	}
 	if len(protected) > 0 {
-		parts = append(parts, "Не удалены из-за .env/admin-настроек: "+formatIDs(protected)+".")
+		parts = append(parts, tr(language, "Не удалены из-за .env/admin-настроек: ", "Protected by .env/admin settings: ")+formatIDs(protected)+".")
 	}
 	if len(missing) > 0 {
-		parts = append(parts, "Не были в runtime whitelist: "+formatIDs(missing)+".")
+		parts = append(parts, tr(language, "Не были в runtime whitelist: ", "Not in the runtime whitelist: ")+formatIDs(missing)+".")
 	}
 	_ = b.sendMessage(ctx, chatID, strings.Join(parts, "\n"))
 }
@@ -103,13 +106,14 @@ func (b *Bot) showAllowedUsers(ctx context.Context, chatID, adminID int64) {
 
 	admins := sortedIDs(b.cfg.AdminUsers)
 	envAllowed := sortedIDs(b.cfg.AllowedUsers)
+	language := b.userLanguage(adminID)
 	if len(admins) == 0 && len(envAllowed) == 0 && len(dynamic) == 0 {
-		_ = b.sendMessage(ctx, chatID, "Whitelist пустой: бот сейчас открыт для всех пользователей.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Whitelist пустой: бот сейчас открыт для всех пользователей.", "The whitelist is empty: the bot is open to everyone."))
 		return
 	}
 
 	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(
-		"Доступ к боту:\nАдмины: %s\nИз .env: %s\nДобавлены командами: %s",
+		tr(language, "Доступ к боту:\nАдмины: %s\nИз .env: %s\nДобавлены командами: %s", "Bot access:\nAdmins: %s\nFrom .env: %s\nAdded by commands: %s"),
 		formatIDsOrDash(admins),
 		formatIDsOrDash(envAllowed),
 		formatIDsOrDash(dynamic),
@@ -120,7 +124,7 @@ func (b *Bot) requireAdmin(ctx context.Context, chatID, userID int64) bool {
 	if b.cfg.IsAdmin(userID) {
 		return true
 	}
-	_ = b.sendMessage(ctx, chatID, "Эта команда доступна только администратору.")
+	_ = b.sendMessage(ctx, chatID, tr(b.userLanguage(userID), "Эта команда доступна только администратору.", "This command is available only to an administrator."))
 	return false
 }
 

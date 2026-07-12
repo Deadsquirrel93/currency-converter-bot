@@ -60,6 +60,8 @@ var supportedCurrencies = []currencyInfo{
 var currencyAliases = map[string]string{
 	"$":        "USD",
 	"usd":      "USD",
+	"dollar":   "USD",
+	"dollars":  "USD",
 	"доллар":   "USD",
 	"доллара":  "USD",
 	"доллары":  "USD",
@@ -70,10 +72,13 @@ var currencyAliases = map[string]string{
 
 	"€":    "EUR",
 	"eur":  "EUR",
+	"euro": "EUR",
 	"евро": "EUR",
 
 	"₽":      "RUB",
 	"rub":    "RUB",
+	"ruble":  "RUB",
+	"rubles": "RUB",
 	"руб":    "RUB",
 	"рубль":  "RUB",
 	"рубля":  "RUB",
@@ -82,17 +87,21 @@ var currencyAliases = map[string]string{
 
 	"£":      "GBP",
 	"gbp":    "GBP",
+	"pound":  "GBP",
+	"pounds": "GBP",
 	"фунт":   "GBP",
 	"фунта":  "GBP",
 	"фунтов": "GBP",
 
 	"¥":     "CNY",
 	"cny":   "CNY",
+	"yuan":  "CNY",
 	"юань":  "CNY",
 	"юаня":  "CNY",
 	"юаней": "CNY",
 
 	"jpy":  "JPY",
+	"yen":  "JPY",
 	"иена": "JPY",
 	"иены": "JPY",
 	"йена": "JPY",
@@ -108,6 +117,7 @@ var currencyAliases = map[string]string{
 	"so’m":  "UZS",
 
 	"kzt":   "KZT",
+	"tenge": "KZT",
 	"тенге": "KZT",
 
 	"kgs":   "KGS",
@@ -116,11 +126,14 @@ var currencyAliases = map[string]string{
 	"сомов": "KGS",
 
 	"try":  "TRY",
+	"lira": "TRY",
 	"лира": "TRY",
 	"лиры": "TRY",
 	"лир":  "TRY",
 
 	"aed":      "AED",
+	"dirham":   "AED",
+	"dirhams":  "AED",
 	"дирхам":   "AED",
 	"дирхама":  "AED",
 	"дирхамов": "AED",
@@ -246,14 +259,45 @@ func isCurrencySymbol(r rune) bool {
 }
 
 func supportedCurrenciesText() string {
+	return supportedCurrenciesTextForLanguage(languageRussian)
+}
+
+var englishCurrencyNames = map[string][2]string{
+	"RUB": {"Russian ruble", "Russia"}, "USD": {"US dollar", "United States"},
+	"EUR": {"euro", "Eurozone"}, "GBP": {"pound sterling", "United Kingdom"},
+	"CHF": {"Swiss franc", "Switzerland"}, "CNY": {"Chinese yuan", "China"},
+	"JPY": {"Japanese yen", "Japan"}, "KRW": {"South Korean won", "South Korea"},
+	"TRY": {"Turkish lira", "Türkiye"}, "AED": {"UAE dirham", "United Arab Emirates"},
+	"KZT": {"Kazakhstani tenge", "Kazakhstan"}, "BYN": {"Belarusian ruble", "Belarus"},
+	"AMD": {"Armenian dram", "Armenia"}, "GEL": {"Georgian lari", "Georgia"},
+	"KGS": {"Kyrgyzstani som", "Kyrgyzstan"}, "TJS": {"Tajikistani somoni", "Tajikistan"},
+	"UZS": {"Uzbekistani som", "Uzbekistan"}, "TMT": {"Turkmenistani manat", "Turkmenistan"},
+	"AZN": {"Azerbaijani manat", "Azerbaijan"}, "MDL": {"Moldovan leu", "Moldova"},
+	"UAH": {"Ukrainian hryvnia", "Ukraine"}, "PLN": {"Polish zloty", "Poland"},
+	"CZK": {"Czech koruna", "Czechia"}, "HUF": {"Hungarian forint", "Hungary"},
+	"RON": {"Romanian leu", "Romania"}, "BGN": {"Bulgarian lev", "Bulgaria"},
+	"RSD": {"Serbian dinar", "Serbia"}, "SEK": {"Swedish krona", "Sweden"},
+	"NOK": {"Norwegian krone", "Norway"}, "DKK": {"Danish krone", "Denmark"},
+	"CAD": {"Canadian dollar", "Canada"}, "AUD": {"Australian dollar", "Australia"},
+	"NZD": {"New Zealand dollar", "New Zealand"}, "SGD": {"Singapore dollar", "Singapore"},
+	"HKD": {"Hong Kong dollar", "Hong Kong"}, "INR": {"Indian rupee", "India"},
+	"IDR": {"Indonesian rupiah", "Indonesia"}, "THB": {"Thai baht", "Thailand"},
+	"VND": {"Vietnamese dong", "Vietnam"}, "QAR": {"Qatari riyal", "Qatar"},
+	"EGP": {"Egyptian pound", "Egypt"}, "BRL": {"Brazilian real", "Brazil"},
+	"ZAR": {"South African rand", "South Africa"},
+}
+
+func supportedCurrenciesTextForLanguage(language string) string {
 	var b strings.Builder
-	b.WriteString("Поддерживаемые валюты. Код пишите так: /from USD или /to EUR\n\n")
+	b.WriteString(tr(language, "Поддерживаемые валюты. Код пишите так: /from USD или /to EUR\n\n", "Supported currencies. Use codes like /from USD or /to EUR\n\n"))
 	for _, currency := range supportedCurrencies {
-		b.WriteString(currency.Code)
-		b.WriteString(" - ")
-		b.WriteString(currency.Name)
-		b.WriteString(" (")
-		b.WriteString(currency.Country)
+		name, country := currency.Name, currency.Country
+		if normalizeLanguage(language) == languageEnglish {
+			if english, ok := englishCurrencyNames[currency.Code]; ok {
+				name, country = english[0], english[1]
+			}
+		}
+		b.WriteString(currency.Code + " - " + name + " (" + country)
 		b.WriteString(")\n")
 	}
 	return strings.TrimRight(b.String(), "\n")

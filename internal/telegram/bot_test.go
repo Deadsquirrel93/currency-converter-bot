@@ -88,15 +88,78 @@ func TestParseYesNo(t *testing.T) {
 	}
 }
 
+func TestNormalizeLanguage(t *testing.T) {
+	for input, want := range map[string]string{
+		"ru": languageRussian,
+		"RU": languageRussian,
+		"en": languageEnglish,
+		"EN": languageEnglish,
+		"de": "",
+		"":   "",
+	} {
+		if got := normalizeLanguage(input); got != want {
+			t.Fatalf("normalizeLanguage(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestLanguageKeyboardUsesFlagsAndCallbackData(t *testing.T) {
+	markup := languageKeyboard()
+	if markup == nil || len(markup.InlineKeyboard) != 1 || len(markup.InlineKeyboard[0]) != 2 {
+		t.Fatalf("languageKeyboard() = %+v", markup)
+	}
+	buttons := markup.InlineKeyboard[0]
+	if buttons[0].Text != "🇷🇺 Русский" || buttons[0].CallbackData != "lang:ru" {
+		t.Fatalf("Russian button = %+v", buttons[0])
+	}
+	if buttons[1].Text != "🇬🇧 English" || buttons[1].CallbackData != "lang:en" {
+		t.Fatalf("English button = %+v", buttons[1])
+	}
+}
+
+func TestEnglishLocalizedTexts(t *testing.T) {
+	s := session{Language: "en", From: "USD", To: "RUB", Multiplier: 1}
+	settings := settingsTextForLanguage(s, rates.Snapshot{}, languageEnglish)
+	for _, want := range []string{"Settings:", "Language: 🇬🇧 English", "Pair: USD -> RUB", "Rates updated: no data"} {
+		if !strings.Contains(settings, want) {
+			t.Fatalf("English settings must contain %q, got:\n%s", want, settings)
+		}
+	}
+	list := supportedCurrenciesTextForLanguage(languageEnglish)
+	for _, want := range []string{"Supported currencies", "USD - US dollar (United States)"} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("English list must contain %q, got:\n%s", want, list)
+		}
+	}
+}
+
+func TestEnglishConversionReply(t *testing.T) {
+	snapshot := rates.Snapshot{Rates: map[string]rates.Rate{
+		"RUB": {Code: "RUB", Nominal: 1, Value: 1},
+		"USD": {Code: "USD", Nominal: 1, Value: 100},
+	}}
+	reply, err := conversionReplyForLanguage(100, 2, "USD", "RUB", 1, 0, 0, false, "", snapshot, languageEnglish)
+	if err != nil {
+		t.Fatalf("conversionReplyForLanguage(): %v", err)
+	}
+	for _, want := range []string{"Total:", "Lines included: 2", "Rate: 1 USD"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("English reply must contain %q, got:\n%s", want, reply)
+		}
+	}
+}
+
 func TestResolveCurrencyToken(t *testing.T) {
 	tests := map[string]string{
-		"usd":    "USD",
-		"$":      "USD",
-		"баксов": "USD",
-		"€":      "EUR",
-		"руб":    "RUB",
-		"сум":    "UZS",
-		"тенге":  "KZT",
+		"usd":     "USD",
+		"$":       "USD",
+		"dollars": "USD",
+		"баксов":  "USD",
+		"€":       "EUR",
+		"pounds":  "GBP",
+		"руб":     "RUB",
+		"сум":     "UZS",
+		"тенге":   "KZT",
 	}
 
 	for input, want := range tests {
@@ -539,7 +602,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "whoami", "allow", "disallow", "allowed", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "lang", "whoami", "allow", "disallow", "allowed", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
@@ -601,6 +664,7 @@ func TestBotPersistsSessions(t *testing.T) {
 
 	bot := New(cfg, nil, logger)
 	bot.setSession(42, session{
+		Language:          "en",
 		From:              "UZS",
 		To:                "RUB",
 		With:              []string{"USD", "EUR"},
@@ -625,10 +689,14 @@ func TestBotPersistsSessions(t *testing.T) {
 	if !strings.Contains(string(raw), `"inline_modify": true`) {
 		t.Fatalf("settings file must contain inline_modify, got:\n%s", string(raw))
 	}
+	if !strings.Contains(string(raw), `"language": "en"`) {
+		t.Fatalf("settings file must contain language, got:\n%s", string(raw))
+	}
 
 	restarted := New(cfg, nil, logger)
 	got := restarted.getSession(42)
 	want := session{
+		Language:          "en",
 		From:              "UZS",
 		To:                "RUB",
 		With:              []string{"USD", "EUR"},

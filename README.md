@@ -1,12 +1,15 @@
 # Currency Converter Telegram Bot
 
+🇷🇺 Русская документация | [🇬🇧 English documentation](README.en.md)
+
 Telegram-бот на Go, который конвертирует суммы между валютами. Доступ можно ограничить whitelist по Telegram ID или оставить открытым для всех.
 
 ## Возможности
 
+- интерфейс на русском и английском языках; при первом обращении бот предлагает выбрать язык кнопками 🇷🇺/🇬🇧, а `/lang en` и `/lang ru` позволяют сменить его позже
 - whitelist пользователей через `TELEGRAM_ALLOWED_USER_IDS` и runtime-файл `ALLOWED_USERS_FILE`; если админы, env whitelist и runtime whitelist пустые, бот доступен всем
 - админы через `TELEGRAM_ADMIN_USER_IDS`: команды `/allow`, `/disallow`, `/allowed` добавляют и удаляют пользователей по Telegram ID без деплоя
-- команды `/from USD`, `/to EUR`, `/swap`, `/rate USD EUR`, `/subscribe 09:00 USD RUB`, `/subscription`, `/unsubscribe`, `/with USD EUR RUB`, `/with_modify yes`, `/inline_modify yes`, `/multi 1000`, `/round auto`, `/modify_from 1.5`, `/modify_to 1.5`, `/reset`, `/delete`, `/settings`, `/whoami`, `/help`, `/list`
+- команды `/lang en`, `/from USD`, `/to EUR`, `/swap`, `/rate USD EUR`, `/subscribe 09:00 USD RUB`, `/subscription`, `/unsubscribe`, `/with USD EUR RUB`, `/with_modify yes`, `/inline_modify yes`, `/multi 1000`, `/round auto`, `/modify_from 1.5`, `/modify_to 1.5`, `/reset`, `/delete`, `/settings`, `/whoami`, `/help`, `/list`
 - inline mode: `@your_bot 100 usd rub`
 - ввод суммы свободным текстом: `12 345,67 usd` -> `12345.67`
 - умножение количества на цену в строке: `100х9`, `100 x 9`, `100 * 9`
@@ -112,6 +115,7 @@ docker compose restart bot
 В Telegram:
 
 ```text
+/lang en
 /from USD
 /to RUB
 12 345,67
@@ -150,6 +154,8 @@ docker compose restart bot
 Если списки доступа пустые, inline mode доступен всем. Если задан админ, env whitelist или runtime whitelist, inline-ответы получат только разрешенные Telegram ID.
 
 Выбранные пользователями настройки сохраняются в `data/user_settings.json`. Пользователи, добавленные админом через `/allow`, сохраняются в `data/allowed_users.json`. В Docker Compose папка `./data` подключена как volume, поэтому настройки и runtime whitelist сохраняются после пересборки образа и перезапуска контейнера.
+
+При `/start` или первом сообщении пользователя без сохраненного языка бот показывает кнопки `🇷🇺 Русский` и `🇬🇧 English`. Выбор сохраняется в `data/user_settings.json`. Сменить язык можно командами `/lang ru` и `/lang en`; команда `/lang` без аргумента снова показывает кнопки. `/reset` сохраняет выбранный язык, а `/delete` удаляет его вместе с остальными настройками.
 
 `/help` показывает справку, а `/list` возвращает список поддерживаемых популярных валют с кодом, названием и страной.
 

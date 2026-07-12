@@ -37,6 +37,7 @@ type Bot struct {
 }
 
 type session struct {
+	Language          string   `json:"language,omitempty"`
 	From              string   `json:"from"`
 	To                string   `json:"to"`
 	With              []string `json:"with,omitempty"`
@@ -170,8 +171,18 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 		return
 	}
 
+	if isCommand(text, "/lang") {
+		b.setLanguage(ctx, chatID, userID, text)
+		return
+	}
+	if b.getSession(userID).Language == "" {
+		b.showLanguageSelector(ctx, chatID)
+		return
+	}
+	lang := b.userLanguage(userID)
+
 	if text == "" {
-		_ = b.sendMessage(ctx, chatID, "Пришлите сумму числом или используйте /from USD и /to RUB.")
+		_ = b.sendMessage(ctx, chatID, tr(lang, "Пришлите сумму числом или используйте /from USD и /to RUB.", "Send an amount as a number or use /from USD and /to RUB."))
 		return
 	}
 
@@ -187,7 +198,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 	case isCommand(text, "/allowed"):
 		b.showAllowedUsers(ctx, chatID, userID)
 	case isCommand(text, "/list"):
-		_ = b.sendMessage(ctx, chatID, supportedCurrenciesText())
+		_ = b.sendMessage(ctx, chatID, supportedCurrenciesTextForLanguage(lang))
 	case isCommand(text, "/settings"):
 		b.showSettings(ctx, chatID, userID)
 	case isCommand(text, "/rate"):
@@ -237,29 +248,43 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 		_ = b.answerCallbackQuery(ctx, query.ID, "Нет доступа")
 		return
 	}
+	if strings.HasPrefix(query.Data, "lang:") {
+		language := normalizeLanguage(strings.TrimPrefix(query.Data, "lang:"))
+		if language == "" {
+			_ = b.answerCallbackQuery(ctx, query.ID, "Invalid language")
+			return
+		}
+		b.saveLanguage(userID, language)
+		_ = b.answerCallbackQuery(ctx, query.ID, tr(language, "Язык выбран", "Language selected"))
+		if query.Message != nil {
+			_ = b.sendMessage(ctx, query.Message.Chat.ID, tr(language, "🇷🇺 Язык изменен на русский. Отправьте /help, чтобы увидеть команды.", "🇬🇧 Language changed to English. Send /help to see the commands."))
+		}
+		return
+	}
+	language := b.userLanguage(userID)
 	if query.Message == nil {
-		_ = b.answerCallbackQuery(ctx, query.ID, "Сообщение недоступно")
+		_ = b.answerCallbackQuery(ctx, query.ID, tr(language, "Сообщение недоступно", "Message unavailable"))
 		return
 	}
 
 	request, err := parseWithCallbackData(query.Data)
 	if err != nil {
-		_ = b.answerCallbackQuery(ctx, query.ID, "Кнопка устарела")
+		_ = b.answerCallbackQuery(ctx, query.ID, tr(language, "Кнопка устарела", "Button expired"))
 		return
 	}
 
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
-		_ = b.answerCallbackQuery(ctx, query.ID, "Курсы недоступны")
+		_ = b.answerCallbackQuery(ctx, query.ID, tr(language, "Курсы недоступны", "Rates unavailable"))
 		return
 	}
 
 	s := b.getSession(userID)
-	reply, err := conversionReply(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, s.Round, snapshot)
+	reply, err := conversionReplyForLanguage(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, s.Round, snapshot, language)
 	if err != nil {
-		_ = b.answerCallbackQuery(ctx, query.ID, "Не удалось перевести")
-		_ = b.sendMessage(ctx, query.Message.Chat.ID, fmt.Sprintf("%s. Проверьте настройки.", err.Error()))
+		_ = b.answerCallbackQuery(ctx, query.ID, tr(language, "Не удалось перевести", "Conversion failed"))
+		_ = b.sendMessage(ctx, query.Message.Chat.ID, fmt.Sprintf("%s. %s", err.Error(), tr(language, "Проверьте настройки.", "Check your settings.")))
 		return
 	}
 
@@ -277,6 +302,11 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 		_ = b.answerInlineQuery(ctx, query.ID, nil)
 		return
 	}
+	if b.getSession(userID).Language == "" {
+		_ = b.answerInlineQuery(ctx, query.ID, nil)
+		return
+	}
+	language := b.userLanguage(userID)
 
 	text := strings.TrimSpace(query.Query)
 	if text == "" {
@@ -299,31 +329,32 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 	}
 
 	settings := conversionSettingsForInput(s, request)
-	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot)
+	reply, err := conversionReplyForLanguage(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot, language)
 	if err != nil {
 		_ = b.answerInlineQuery(ctx, query.ID, nil)
 		return
 	}
 
 	_ = b.answerInlineQuery(ctx, query.ID, []inlineQueryResultArticle{
-		inlineConversionResult(reply),
+		inlineConversionResultForLanguage(reply, language),
 	})
 }
 
 func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
 		if isFrom {
-			_ = b.sendMessage(ctx, chatID, "Укажите валюту: /from USD")
+			_ = b.sendMessage(ctx, chatID, tr(language, "Укажите валюту: /from USD", "Specify a currency: /from USD"))
 		} else {
-			_ = b.sendMessage(ctx, chatID, "Укажите валюту: /to RUB")
+			_ = b.sendMessage(ctx, chatID, tr(language, "Укажите валюту: /to RUB", "Specify a currency: /to RUB"))
 		}
 		return
 	}
 
 	code, ok := resolveCurrencyToken(fields[1])
 	if !ok {
-		_ = b.sendMessage(ctx, chatID, "Такой валюты нет в списке бота. Посмотрите доступные варианты через /list.")
+		_ = b.sendMessage(ctx, chatID, invalidCurrencyText(language))
 		return
 	}
 
@@ -334,13 +365,14 @@ func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string
 		s.To = code
 	}
 	b.setSession(userID, s)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: %s -> %s", s.From, s.To))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: %s -> %s", "Done: %s -> %s"), s.From, s.To))
 }
 
 func (b *Bot) setWithCurrency(ctx context.Context, chatID, userID int64, text string) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		_ = b.sendMessage(ctx, chatID, "Укажите валюты: /with USD EUR RUB. Для отключения используйте /with off.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Укажите валюты: /with USD EUR RUB. Для отключения используйте /with off.", "Specify currencies: /with USD EUR RUB. Use /with off to disable."))
 		return
 	}
 
@@ -348,32 +380,33 @@ func (b *Bot) setWithCurrency(ctx context.Context, chatID, userID int64, text st
 		s := b.getSession(userID)
 		s.With = nil
 		b.setSession(userID, s)
-		_ = b.sendMessage(ctx, chatID, "Готово: кнопки дополнительного перевода отключены.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Готово: кнопки дополнительного перевода отключены.", "Done: additional conversion buttons are disabled."))
 		return
 	}
 
 	codes, err := parseCurrencyList(fields[1:])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, err.Error())
+		_ = b.sendMessage(ctx, chatID, tr(language, err.Error(), "Could not read the currency list. Use /with USD EUR RUB or see /list."))
 		return
 	}
 
 	s := b.getSession(userID)
 	s.With = codes
 	b.setSession(userID, s)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: в ответах будут кнопки: %s.", strings.Join(codes, ", ")))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: в ответах будут кнопки: %s.", "Done: replies will include buttons for: %s."), strings.Join(codes, ", ")))
 }
 
 func (b *Bot) setWithModify(ctx context.Context, chatID, userID int64, text string) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		_ = b.sendMessage(ctx, chatID, "Укажите yes или no: /with_modify yes.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Укажите yes или no: /with_modify yes.", "Specify yes or no: /with_modify yes."))
 		return
 	}
 
 	value, err := parseYesNo(fields[1])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Значение должно быть yes или no.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Значение должно быть yes или no.", "The value must be yes or no."))
 		return
 	}
 
@@ -381,22 +414,23 @@ func (b *Bot) setWithModify(ctx context.Context, chatID, userID int64, text stri
 	s.WithModify = value
 	b.setSession(userID, s)
 	if value {
-		_ = b.sendMessage(ctx, chatID, "Готово: кнопки /with будут учитывать modify_from и modify_to.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Готово: кнопки /with будут учитывать modify_from и modify_to.", "Done: /with buttons will apply modify_from and modify_to."))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, "Готово: кнопки /with не будут учитывать modify_from и modify_to.")
+	_ = b.sendMessage(ctx, chatID, tr(language, "Готово: кнопки /with не будут учитывать modify_from и modify_to.", "Done: /with buttons will not apply modify_from and modify_to."))
 }
 
 func (b *Bot) setInlineModify(ctx context.Context, chatID, userID int64, text string) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		_ = b.sendMessage(ctx, chatID, "Укажите yes или no: /inline_modify yes.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Укажите yes или no: /inline_modify yes.", "Specify yes or no: /inline_modify yes."))
 		return
 	}
 
 	value, err := parseYesNo(fields[1])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Значение должно быть yes или no.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Значение должно быть yes или no.", "The value must be yes or no."))
 		return
 	}
 
@@ -404,64 +438,67 @@ func (b *Bot) setInlineModify(ctx context.Context, chatID, userID int64, text st
 	s.InlineModify = value
 	b.setSession(userID, s)
 	if value {
-		_ = b.sendMessage(ctx, chatID, "Готово: явные валюты в тексте будут учитывать modify_from и modify_to.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Готово: явные валюты в тексте будут учитывать modify_from и modify_to.", "Done: explicit currencies in text will apply modify_from and modify_to."))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, "Готово: явные валюты в тексте не будут учитывать modify_from и modify_to.")
+	_ = b.sendMessage(ctx, chatID, tr(language, "Готово: явные валюты в тексте не будут учитывать modify_from и modify_to.", "Done: explicit currencies in text will not apply modify_from and modify_to."))
 }
 
 func (b *Bot) setMultiplier(ctx context.Context, chatID, userID int64, text string) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		_ = b.sendMessage(ctx, chatID, "Укажите множитель: /multi 1000. Для сброса используйте /multi 1.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Укажите множитель: /multi 1000. Для сброса используйте /multi 1.", "Specify a multiplier: /multi 1000. Use /multi 1 to reset."))
 		return
 	}
 
 	multiplier, err := parseMultiplier(fields[1])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Множитель должен быть положительным числом, например 1000, 10.5 или 1.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Множитель должен быть положительным числом, например 1000, 10.5 или 1.", "The multiplier must be a positive number, such as 1000, 10.5, or 1."))
 		return
 	}
 
 	s := b.getSession(userID)
 	s.Multiplier = multiplier
 	b.setSession(userID, s)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: входная сумма будет умножаться на %s.", formatNumber(multiplier)))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: входная сумма будет умножаться на %s.", "Done: the input amount will be multiplied by %s."), formatNumber(multiplier)))
 }
 
 func (b *Bot) setRound(ctx context.Context, chatID, userID int64, text string) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
-		_ = b.sendMessage(ctx, chatID, "Укажите округление: /round auto, /round 0, /round 2, /round 4 или /round 6.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Укажите округление: /round auto, /round 0, /round 2, /round 4 или /round 6.", "Specify rounding: /round auto, /round 0, /round 2, /round 4, or /round 6."))
 		return
 	}
 
 	round, err := parseRoundMode(fields[1])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Округление должно быть auto, 0, 2, 4 или 6.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Округление должно быть auto, 0, 2, 4 или 6.", "Rounding must be auto, 0, 2, 4, or 6."))
 		return
 	}
 
 	s := b.getSession(userID)
 	s.Round = round
 	b.setSession(userID, s)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: округление результата - %s.", formatRoundMode(round)))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: округление результата — %s.", "Done: result rounding is %s."), formatRoundMode(round)))
 }
 
 func (b *Bot) setModifier(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	command := "/modify_to"
 	if isFrom {
 		command = "/modify_from"
 	}
 	if len(fields) < 2 {
-		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Укажите процент: %s 1.5. Для сброса используйте %s 0.", command, command))
+		_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Укажите процент: %s 1.5. Для сброса используйте %s 0.", "Specify a percentage: %s 1.5. Use %s 0 to reset."), command, command))
 		return
 	}
 
 	percent, err := parseModifierPercent(fields[1])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Процент должен быть числом, например 1.5, +1,5 или -2.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Процент должен быть числом, например 1.5, +1,5 или -2.", "The percentage must be a number, such as 1.5, +1.5, or -2."))
 		return
 	}
 
@@ -474,10 +511,10 @@ func (b *Bot) setModifier(ctx context.Context, chatID, userID int64, text string
 	b.setSession(userID, s)
 
 	if isFrom {
-		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: входная сумма будет изменяться на %s.", formatPercent(percent)))
+		_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: входная сумма будет изменяться на %s.", "Done: the input amount will be adjusted by %s."), formatPercent(percent)))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: результат будет изменяться на %s.", formatPercent(percent)))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: результат будет изменяться на %s.", "Done: the result will be adjusted by %s."), formatPercent(percent)))
 }
 
 func (b *Bot) showSettings(ctx context.Context, chatID, userID int64) {
@@ -485,42 +522,46 @@ func (b *Bot) showSettings(ctx context.Context, chatID, userID int64) {
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
-		_ = b.sendMessage(ctx, chatID, settingsText(s, rates.Snapshot{}))
+		_ = b.sendMessage(ctx, chatID, settingsTextForLanguage(s, rates.Snapshot{}, b.userLanguage(userID)))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, settingsText(s, snapshot))
+	_ = b.sendMessage(ctx, chatID, settingsTextForLanguage(s, snapshot, b.userLanguage(userID)))
 }
 
 func (b *Bot) resetSettings(ctx context.Context, chatID, userID int64) {
+	language := b.userLanguage(userID)
 	s := defaultSession(b.cfg.DefaultFrom, b.cfg.DefaultTo)
+	s.Language = language
 	b.setSession(userID, s)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Настройки сброшены: %s -> %s.", s.From, s.To))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Настройки сброшены: %s -> %s.", "Settings reset: %s -> %s."), s.From, s.To))
 }
 
 func (b *Bot) swapCurrencies(ctx context.Context, chatID, userID int64) {
 	s := b.getSession(userID)
 	s.From, s.To = s.To, s.From
 	b.setSession(userID, s)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: %s -> %s", s.From, s.To))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(b.userLanguage(userID), "Готово: %s -> %s", "Done: %s -> %s"), s.From, s.To))
 }
 
 func (b *Bot) deleteSettings(ctx context.Context, chatID, userID int64) {
+	language := b.userLanguage(userID)
 	b.deleteSession(userID)
-	_ = b.sendMessage(ctx, chatID, "Ваши сохраненные настройки удалены. При следующем сообщении будут использоваться настройки по умолчанию.")
+	_ = b.sendMessage(ctx, chatID, tr(language, "Ваши сохраненные настройки удалены. При следующем сообщении нужно будет снова выбрать язык.", "Your saved settings have been deleted. You will need to choose a language again with your next message."))
 }
 
 func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
+	language := b.userLanguage(userID)
 	s := b.getSession(userID)
 	request, err := parseRateRequest(text, s)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, err.Error())
+		_ = b.sendMessage(ctx, chatID, tr(language, err.Error(), "Unknown currency. See the available currencies with /list."))
 		return
 	}
 
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
-		_ = b.sendMessage(ctx, chatID, "Не удалось получить курсы валют. Попробуйте чуть позже.")
+		_ = b.sendMessage(ctx, chatID, ratesUnavailableText(language))
 		return
 	}
 
@@ -529,15 +570,16 @@ func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 		location = time.Local
 	}
 	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, time.Now().In(location))
-	reply, err := rateReplyWithHistory(request.From, request.To, snapshot, historicalSnapshots)
+	reply, err := rateReplyWithHistoryForLanguage(request.From, request.To, snapshot, historicalSnapshots, language)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте валюты.", err.Error()))
+		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, err.Error()))
 		return
 	}
 	_ = b.sendMessage(ctx, chatID, reply)
 }
 
 func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text string) {
+	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) == 2 && isOffValue(fields[1]) {
 		b.deleteSubscription(ctx, chatID, userID)
@@ -547,7 +589,7 @@ func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text st
 	s := b.getSession(userID)
 	subscription, err := parseSubscription(text, s)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, err.Error())
+		_ = b.sendMessage(ctx, chatID, tr(language, err.Error(), "Invalid subscription. Use /subscribe 09:00 or /subscribe 09:00 USD RUB."))
 		return
 	}
 	subscription.ChatID = chatID
@@ -558,45 +600,48 @@ func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text st
 	}
 
 	b.setUserSubscription(userID, subscription)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Готово: буду присылать курс %s -> %s каждый день в %s (%s).", subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: буду присылать курс %s -> %s каждый день в %s (%s).", "Done: I will send the %s -> %s rate every day at %s (%s)."), subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
 }
 
 func (b *Bot) showSubscription(ctx context.Context, chatID, userID int64) {
+	language := b.userLanguage(userID)
 	subscription, ok := b.getUserSubscription(userID)
 	if !ok {
-		_ = b.sendMessage(ctx, chatID, "Подписка выключена. Включить: /subscribe 09:00 или /subscribe 09:00 USD RUB.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Подписка выключена. Включить: /subscribe 09:00 или /subscribe 09:00 USD RUB.", "Subscription is off. Enable it with /subscribe 09:00 or /subscribe 09:00 USD RUB."))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf("Подписка:\nПара: %s -> %s\nВремя: %s (%s)\nОтключить: /unsubscribe", subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Подписка:\nПара: %s -> %s\nВремя: %s (%s)\nОтключить: /unsubscribe", "Subscription:\nPair: %s -> %s\nTime: %s (%s)\nDisable: /unsubscribe"), subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
 }
 
 func (b *Bot) deleteSubscription(ctx context.Context, chatID, userID int64) {
+	language := b.userLanguage(userID)
 	if b.removeUserSubscription(userID) {
-		_ = b.sendMessage(ctx, chatID, "Подписка отключена.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Подписка отключена.", "Subscription disabled."))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, "Подписка уже выключена.")
+	_ = b.sendMessage(ctx, chatID, tr(language, "Подписка уже выключена.", "Subscription is already disabled."))
 }
 
 func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text string) {
 	s := b.getSession(userID)
+	language := b.userLanguage(userID)
 	request, err := parseConversionInput(text, s)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.")
+		_ = b.sendMessage(ctx, chatID, tr(language, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.", "I cannot find an amount. For example: 12,345.67, or several amounts on separate lines."))
 		return
 	}
 
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
-		_ = b.sendMessage(ctx, chatID, "Не удалось получить курсы валют. Попробуйте чуть позже.")
+		_ = b.sendMessage(ctx, chatID, ratesUnavailableText(language))
 		return
 	}
 
 	settings := conversionSettingsForInput(s, request)
-	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot)
+	reply, err := conversionReplyForLanguage(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot, language)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, fmt.Sprintf("%s. Проверьте валюты.", err.Error()))
+		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, err.Error()))
 		return
 	}
 
@@ -605,18 +650,21 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		buttonSession := s
 		buttonSession.From = request.From
 		buttonSession.Multiplier = settings.Multiplier
-		markup = withReplyMarkup(request.Amount, buttonSession)
+		markup = withReplyMarkupForLanguage(request.Amount, buttonSession, language)
 	}
 	_ = b.sendHTMLMessageWithMarkup(ctx, chatID, reply, markup)
 }
 
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
-	text := fmt.Sprintf("Я конвертирую валюты по официальным курсам ЦБ РФ. Если списки доступа пустые, я доступен всем; если задан админ или whitelist, отвечаю только разрешенным Telegram ID.\n\nТекущая пара: %s -> %s\n\nКоманды:\n/from USD - выбрать исходную валюту\n/to RUB - выбрать валюту результата\n/swap - поменять исходную и итоговую валюты местами\n/rate USD RUB - показать текущий курс пары\n/subscribe 09:00 - ежедневный курс текущей пары\n/subscribe 09:00 USD RUB - ежедневный курс выбранной пары\n/subscription - показать подписку\n/unsubscribe - отключить подписку\n/with USD EUR RUB - добавить кнопки перевода в валюты\n/with off - отключить кнопки перевода\n/with_modify yes - учитывать modify_from и modify_to для кнопок\n/inline_modify yes - учитывать modify_from и modify_to для явных валют в тексте\n/multi 1000 - умножать входную сумму перед расчетом\n/round auto - округление результата: auto, 0, 2, 4 или 6\n/modify_from 1.5 - изменить входную сумму на процент перед расчетом\n/modify_to 1.5 - изменить результат на процент после расчета\n/reset - сбросить настройки к значениям по умолчанию\n/delete - удалить сохраненные настройки пользователя\n/settings - текущие настройки\n/whoami - показать ваш Telegram ID\n/list - список поддерживаемых валют\n/help - эта справка", s.From, s.To)
+	language := b.userLanguage(userID)
+	russian := "Я конвертирую валюты по официальным курсам ЦБ РФ.\n\nЯзык: %s\nТекущая пара: %s -> %s\n\nКоманды:\n/lang en — сменить язык (en/ru)\n/from USD — выбрать исходную валюту\n/to RUB — выбрать валюту результата\n/swap — поменять валюты местами\n/rate USD RUB — показать текущий курс пары\n/subscribe 09:00 [USD RUB] — ежедневный курс\n/subscription — показать подписку\n/unsubscribe — отключить подписку\n/with USD EUR RUB — добавить кнопки перевода\n/with off — отключить кнопки\n/with_modify yes — применять модификаторы для кнопок\n/inline_modify yes — применять модификаторы для явных валют\n/multi 1000 — множитель входной суммы\n/round auto — округление: auto, 0, 2, 4 или 6\n/modify_from 1.5 — процент к входной сумме\n/modify_to 1.5 — процент к результату\n/reset — сбросить настройки (язык сохранится)\n/delete — удалить настройки и выбор языка\n/settings — текущие настройки\n/whoami — показать Telegram ID\n/list — список валют\n/help — эта справка"
+	english := "I convert currencies using the official exchange rates of the Bank of Russia.\n\nLanguage: %s\nCurrent pair: %s -> %s\n\nCommands:\n/lang ru — change language (en/ru)\n/from USD — select the source currency\n/to RUB — select the target currency\n/swap — swap the currencies\n/rate USD RUB — show the current pair rate\n/subscribe 09:00 [USD RUB] — daily rate subscription\n/subscription — show the subscription\n/unsubscribe — disable the subscription\n/with USD EUR RUB — add conversion buttons\n/with off — disable the buttons\n/with_modify yes — apply modifiers to buttons\n/inline_modify yes — apply modifiers to explicit currencies\n/multi 1000 — multiply the input amount\n/round auto — rounding: auto, 0, 2, 4, or 6\n/modify_from 1.5 — adjust the input amount by a percentage\n/modify_to 1.5 — adjust the result by a percentage\n/reset — reset settings (language is preserved)\n/delete — delete settings and language choice\n/settings — show current settings\n/whoami — show your Telegram ID\n/list — list supported currencies\n/help — show this help"
+	text := fmt.Sprintf(tr(language, russian, english), languageName(language), s.From, s.To)
 	if b.cfg.IsAdmin(userID) {
-		text += "\n\nАдмин-команды:\n/allow 123456789 - разрешить пользователя по Telegram ID\n/disallow 123456789 - убрать пользователя из runtime whitelist\n/allowed - показать админов и разрешенных пользователей"
+		text += tr(language, "\n\nАдмин-команды:\n/allow 123456789 — разрешить пользователя по Telegram ID\n/disallow 123456789 — убрать пользователя из runtime whitelist\n/allowed — показать список доступа", "\n\nAdmin commands:\n/allow 123456789 — allow a Telegram user ID\n/disallow 123456789 — remove a user from the runtime whitelist\n/allowed — show the access list")
 	}
-	text += "\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Когда валюты указаны в тексте явно, /multi не применяется, а modify_from и modify_to применяются только после /inline_modify yes. Для покупок можно писать 100х9, 100 x 9 или 100 * 9; русская и английская х/x поддерживаются. Несколько сумм с новой строки я сложу и переведу итог.\n\nInline mode: в любом чате пишите @имя_бота 100 usd rub."
+	text += tr(language, "\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Для покупок поддерживаются 100х9, 100 x 9 и 100 * 9. Суммы на разных строках будут сложены.\n\nInline mode: @имя_бота 100 usd rub.", "\n\nYou can enter 100 usd to rub, 100$ in rub, or simply 12,345.67. Purchases support 100x9 and 100 * 9. Amounts on separate lines are added together.\n\nInline mode: @bot_name 100 usd rub.")
 	return text
 }
 
@@ -783,12 +831,13 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, localNow)
 
 	for userID, subscription := range due {
-		reply, err := rateReplyWithHistory(subscription.From, subscription.To, snapshot, historicalSnapshots)
+		language := b.userLanguage(userID)
+		reply, err := rateReplyWithHistoryForLanguage(subscription.From, subscription.To, snapshot, historicalSnapshots, language)
 		if err != nil {
 			b.log.Error("subscription rate reply failed", "user_id", userID, "from", subscription.From, "to", subscription.To, "error", err)
 			continue
 		}
-		text := fmt.Sprintf("Ежедневный курс %s -> %s\n\n%s", subscription.From, subscription.To, reply)
+		text := fmt.Sprintf(tr(language, "Ежедневный курс %s -> %s\n\n%s", "Daily rate %s -> %s\n\n%s"), subscription.From, subscription.To, reply)
 		if err := b.sendMessage(ctx, subscription.ChatID, text); err != nil {
 			b.log.Error("send subscription failed", "user_id", userID, "chat_id", subscription.ChatID, "error", err)
 			continue
@@ -900,15 +949,18 @@ func (b *Bot) answerInlineQuery(ctx context.Context, inlineQueryID string, resul
 }
 
 func (b *Bot) setBotCommands(ctx context.Context) error {
-	var result apiResponse
-	err := b.post(ctx, "setMyCommands", map[string]any{
-		"commands": botCommands(),
-	}, &result)
-	if err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram setMyCommands failed: %s", result.Description)
+	for _, language := range []string{"", languageRussian, languageEnglish} {
+		var result apiResponse
+		payload := map[string]any{"commands": botCommandsForLanguage(language)}
+		if language != "" {
+			payload["language_code"] = language
+		}
+		if err := b.post(ctx, "setMyCommands", payload, &result); err != nil {
+			return err
+		}
+		if !result.OK {
+			return fmt.Errorf("telegram setMyCommands failed: %s", result.Description)
+		}
 	}
 	return nil
 }
@@ -1201,6 +1253,10 @@ func applyPercent(value, percent float64) float64 {
 }
 
 func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
+	return rateReplyForLanguage(from, to, snapshot, languageRussian)
+}
+
+func rateReplyForLanguage(from, to string, snapshot rates.Snapshot, language string) (string, error) {
 	direct, err := rates.Convert(1, from, to, snapshot)
 	if err != nil {
 		return "", err
@@ -1210,13 +1266,13 @@ func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
 		return "", err
 	}
 
-	updatedAt := "нет данных"
+	updatedAt := tr(language, "нет данных", "no data")
 	if !snapshot.FetchedAt.IsZero() {
 		updatedAt = snapshot.FetchedAt.UTC().Format("2006-01-02 15:04:05 UTC")
 	}
 
 	return fmt.Sprintf(
-		"Курс:\n1 %s = %s %s%s\n1 %s = %s %s%s\nОбновлено: %s",
+		tr(language, "Курс:\n1 %s = %s %s%s\n1 %s = %s %s%s\nОбновлено: %s", "Rate:\n1 %s = %s %s%s\n1 %s = %s %s%s\nUpdated: %s"),
 		from,
 		formatRate(direct),
 		to,
@@ -1232,12 +1288,16 @@ func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
 type rateHistoricalSnapshot = subscriptionHistoricalSnapshot
 
 func rateReplyWithHistory(from, to string, snapshot rates.Snapshot, historicalSnapshots []rateHistoricalSnapshot) (string, error) {
-	reply, err := rateReply(from, to, snapshot)
+	return rateReplyWithHistoryForLanguage(from, to, snapshot, historicalSnapshots, languageRussian)
+}
+
+func rateReplyWithHistoryForLanguage(from, to string, snapshot rates.Snapshot, historicalSnapshots []rateHistoricalSnapshot, language string) (string, error) {
+	reply, err := rateReplyForLanguage(from, to, snapshot, language)
 	if err != nil {
 		return "", err
 	}
 	history := subscriptionRateHistoryFromSnapshots(from, to, historicalSnapshots)
-	return reply + "\n\n" + formatSubscriptionRateHistory(from, to, history), nil
+	return reply + "\n\n" + formatSubscriptionRateHistoryForLanguage(from, to, history, language), nil
 }
 
 type subscriptionRateHistory struct {
@@ -1309,40 +1369,52 @@ func subscriptionRatePointFromSnapshot(from, to string, snapshot *subscriptionHi
 }
 
 func formatSubscriptionRateHistory(from, to string, history subscriptionRateHistory) string {
+	return formatSubscriptionRateHistoryForLanguage(from, to, history, languageRussian)
+}
+
+func formatSubscriptionRateHistoryForLanguage(from, to string, history subscriptionRateHistory, language string) string {
 	lines := []string{
-		fmt.Sprintf("Динамика %s -> %s:", from, to),
-		fmt.Sprintf("Со вчера: %s", formatRateDelta(history.CurrentRate, history.Yesterday, to)),
-		fmt.Sprintf("За 7 дней: %s", formatRateDelta(history.CurrentRate, history.WeekAgo, to)),
+		fmt.Sprintf(tr(language, "Динамика %s -> %s:", "%s -> %s trend:"), from, to),
+		fmt.Sprintf(tr(language, "Со вчера: %s", "Since yesterday: %s"), formatRateDeltaForLanguage(history.CurrentRate, history.Yesterday, to, language)),
+		fmt.Sprintf(tr(language, "За 7 дней: %s", "Over 7 days: %s"), formatRateDeltaForLanguage(history.CurrentRate, history.WeekAgo, to, language)),
 	}
 	if history.MonthMin == nil {
-		lines = append(lines, "Минимум за 30 дней: нет данных")
+		lines = append(lines, tr(language, "Минимум за 30 дней: нет данных", "30-day minimum: no data"))
 	} else {
-		lines = append(lines, fmt.Sprintf("Минимум за 30 дней: %s", formatRateExtreme(history.CurrentRate, history.MonthMin, to)))
+		lines = append(lines, fmt.Sprintf(tr(language, "Минимум за 30 дней: %s", "30-day minimum: %s"), formatRateExtremeForLanguage(history.CurrentRate, history.MonthMin, to, language)))
 	}
 	if history.MonthMax == nil {
-		lines = append(lines, "Максимум за 30 дней: нет данных")
+		lines = append(lines, tr(language, "Максимум за 30 дней: нет данных", "30-day maximum: no data"))
 	} else {
-		lines = append(lines, fmt.Sprintf("Максимум за 30 дней: %s", formatRateExtreme(history.CurrentRate, history.MonthMax, to)))
+		lines = append(lines, fmt.Sprintf(tr(language, "Максимум за 30 дней: %s", "30-day maximum: %s"), formatRateExtremeForLanguage(history.CurrentRate, history.MonthMax, to, language)))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func formatRateExtreme(current float64, point *subscriptionRatePoint, to string) string {
+	return formatRateExtremeForLanguage(current, point, to, languageRussian)
+}
+
+func formatRateExtremeForLanguage(current float64, point *subscriptionRatePoint, to, language string) string {
 	if point == nil {
-		return "нет данных"
+		return tr(language, "нет данных", "no data")
 	}
 	return fmt.Sprintf(
-		"%s %s (%s), сейчас %s",
+		tr(language, "%s %s (%s), сейчас %s", "%s %s (%s), now %s"),
 		formatRate(point.Rate),
 		to,
 		point.Date.Format("2006-01-02"),
-		formatRateDelta(current, point, to),
+		formatRateDeltaForLanguage(current, point, to, language),
 	)
 }
 
 func formatRateDelta(current float64, point *subscriptionRatePoint, to string) string {
+	return formatRateDeltaForLanguage(current, point, to, languageRussian)
+}
+
+func formatRateDeltaForLanguage(current float64, point *subscriptionRatePoint, to, language string) string {
 	if point == nil || point.Rate == 0 {
-		return "нет данных"
+		return tr(language, "нет данных", "no data")
 	}
 	delta := current - point.Rate
 	percent := delta / point.Rate * 100
@@ -1454,6 +1526,10 @@ func convenientRateNominal(unitRate float64) (int, bool) {
 }
 
 func conversionReply(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, roundMode string, snapshot rates.Snapshot) (string, error) {
+	return conversionReplyForLanguage(amount, amountCount, from, to, multiplier, modifyFromPercent, modifyToPercent, useModify, roundMode, snapshot, languageRussian)
+}
+
+func conversionReplyForLanguage(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, roundMode string, snapshot rates.Snapshot, language string) (string, error) {
 	multipliedAmount := amount * multiplier
 	effectiveAmount := multipliedAmount
 	if useModify {
@@ -1482,18 +1558,18 @@ func conversionReply(amount float64, amountCount int, from, to string, multiplie
 	resultText := fmt.Sprintf("%s %s", formatConvertedAmountForMode(result, roundMode), to)
 	replyPrefix := fmt.Sprintf("%s = <b>%s</b>", html.EscapeString(amountText), html.EscapeString(resultText))
 	if amountCount > 1 {
-		replyPrefix = fmt.Sprintf("Итого: %s = <b>%s</b>\nСтрок учтено: %d", html.EscapeString(amountText), html.EscapeString(resultText), amountCount)
+		replyPrefix = fmt.Sprintf(tr(language, "Итого: %s = <b>%s</b>\nСтрок учтено: %d", "Total: %s = <b>%s</b>\nLines included: %d"), html.EscapeString(amountText), html.EscapeString(resultText), amountCount)
 	}
 
 	lines := []string{
 		replyPrefix,
-		fmt.Sprintf("Курс: 1 %s = %s %s", html.EscapeString(from), html.EscapeString(formatRate(rawUnitRate)), html.EscapeString(to)),
+		fmt.Sprintf(tr(language, "Курс: 1 %s = %s %s", "Rate: 1 %s = %s %s"), html.EscapeString(from), html.EscapeString(formatRate(rawUnitRate)), html.EscapeString(to)),
 	}
 	if suffix := convenientRateSuffix(from, to, rawUnitRate); suffix != "" {
 		lines = append(lines, html.EscapeString(strings.TrimPrefix(suffix, "\n")))
 	}
 	if multiplier != 1 || (useModify && (modifyFromPercent != 0 || modifyToPercent != 0)) {
-		lines = append(lines, fmt.Sprintf("Расчет для 1 введенной единицы = %s %s", html.EscapeString(formatConvertedAmountForMode(unitRate, roundMode)), html.EscapeString(to)))
+		lines = append(lines, fmt.Sprintf(tr(language, "Расчет для 1 введенной единицы = %s %s", "Result for 1 entered unit = %s %s"), html.EscapeString(formatConvertedAmountForMode(unitRate, roundMode)), html.EscapeString(to)))
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -1512,6 +1588,7 @@ func formatAmountWithSettings(amount, multipliedAmount, effectiveAmount float64,
 }
 
 func normalizeSession(s session, defaultFrom, defaultTo string) session {
+	s.Language = normalizeLanguage(s.Language)
 	if strings.TrimSpace(s.From) == "" {
 		s.From = defaultFrom
 	}
@@ -1562,18 +1639,23 @@ func formatRoundMode(roundMode string) string {
 }
 
 func settingsText(s session, snapshot rates.Snapshot) string {
+	return settingsTextForLanguage(s, snapshot, languageRussian)
+}
+
+func settingsTextForLanguage(s session, snapshot rates.Snapshot, language string) string {
 	s = normalizeSession(s, "", "")
-	updatedAt := "нет данных"
+	updatedAt := tr(language, "нет данных", "no data")
 	if !snapshot.FetchedAt.IsZero() {
 		updatedAt = snapshot.FetchedAt.UTC().Format("2006-01-02 15:04:05 UTC")
 	}
-	with := "выключена"
+	with := tr(language, "выключены", "disabled")
 	if len(s.With) > 0 {
 		with = strings.Join(s.With, ", ")
 	}
 
 	return fmt.Sprintf(
-		"Настройки:\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМодификаторы для явных валют: %s\nМножитель входной суммы: %s\nОкругление результата: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\n\nДругие настройки будут добавлены сюда позже.",
+		tr(language, "Настройки:\nЯзык: %s\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМодификаторы для явных валют: %s\nМножитель входной суммы: %s\nОкругление результата: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s", "Settings:\nLanguage: %s\nPair: %s -> %s\nRates updated: %s\nConversion buttons: %s\nButton modifiers: %s\nExplicit-currency modifiers: %s\nInput multiplier: %s\nResult rounding: %s\nInput modifier: %s\nResult modifier: %s"),
+		languageName(language),
 		s.From,
 		s.To,
 		updatedAt,
@@ -1596,13 +1678,17 @@ func formatPercent(value float64) string {
 }
 
 func withReplyMarkup(amount float64, s session) *inlineKeyboardMarkup {
+	return withReplyMarkupForLanguage(amount, s, languageRussian)
+}
+
+func withReplyMarkupForLanguage(amount float64, s session, language string) *inlineKeyboardMarkup {
 	buttons := make([]inlineKeyboardButton, 0, len(s.With))
 	for _, to := range s.With {
 		data, ok := withCallbackData(amount, s, to)
 		if !ok {
 			continue
 		}
-		buttons = append(buttons, inlineKeyboardButton{Text: "в " + to, CallbackData: data})
+		buttons = append(buttons, inlineKeyboardButton{Text: tr(language, "в ", "to ") + to, CallbackData: data})
 	}
 	if len(buttons) == 0 {
 		return nil
@@ -1616,10 +1702,14 @@ func withReplyMarkup(amount float64, s session) *inlineKeyboardMarkup {
 }
 
 func inlineConversionResult(reply string) inlineQueryResultArticle {
+	return inlineConversionResultForLanguage(reply, languageRussian)
+}
+
+func inlineConversionResultForLanguage(reply, language string) inlineQueryResultArticle {
 	plain := stripTelegramHTML(reply)
 	title := firstLine(plain)
 	if title == "" {
-		title = "Конвертация"
+		title = tr(language, "Конвертация", "Conversion")
 	}
 	return inlineQueryResultArticle{
 		Type:        "article",
@@ -1880,9 +1970,43 @@ func normalizeSubscription(subscription dailySubscription) dailySubscription {
 }
 
 func botCommands() []botCommand {
+	return botCommandsForLanguage(languageRussian)
+}
+
+func botCommandsForLanguage(language string) []botCommand {
+	if normalizeLanguage(language) == languageEnglish {
+		return []botCommand{
+			{Command: "start", Description: "start the bot"},
+			{Command: "help", Description: "command help"},
+			{Command: "lang", Description: "change language 🇬🇧/🇷🇺"},
+			{Command: "whoami", Description: "show your Telegram ID"},
+			{Command: "allow", Description: "allow a user"},
+			{Command: "disallow", Description: "disallow a user"},
+			{Command: "allowed", Description: "access list"},
+			{Command: "settings", Description: "current settings"},
+			{Command: "from", Description: "select source currency"},
+			{Command: "to", Description: "select target currency"},
+			{Command: "swap", Description: "swap currencies"},
+			{Command: "rate", Description: "current pair rate"},
+			{Command: "subscribe", Description: "daily rate"},
+			{Command: "subscription", Description: "current subscription"},
+			{Command: "unsubscribe", Description: "disable subscription"},
+			{Command: "with", Description: "conversion buttons"},
+			{Command: "with_modify", Description: "button modifiers"},
+			{Command: "inline_modify", Description: "explicit-currency modifiers"},
+			{Command: "multi", Description: "input multiplier"},
+			{Command: "round", Description: "result rounding"},
+			{Command: "modify_from", Description: "input percentage"},
+			{Command: "modify_to", Description: "result percentage"},
+			{Command: "reset", Description: "reset settings"},
+			{Command: "delete", Description: "delete settings"},
+			{Command: "list", Description: "currency list"},
+		}
+	}
 	return []botCommand{
 		{Command: "start", Description: "запустить бота"},
 		{Command: "help", Description: "справка по командам"},
+		{Command: "lang", Description: "сменить язык 🇷🇺/🇬🇧"},
 		{Command: "whoami", Description: "показать ваш Telegram ID"},
 		{Command: "allow", Description: "разрешить пользователя"},
 		{Command: "disallow", Description: "запретить пользователя"},
