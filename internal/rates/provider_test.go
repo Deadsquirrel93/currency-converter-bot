@@ -150,3 +150,42 @@ func TestHistoryCacheIsBounded(t *testing.T) {
 		t.Fatal("oldest entries must be evicted first")
 	}
 }
+
+func TestFetchLatestReadsRateDateAndBypassesCache(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		date, value := "28.09.2026", "81,0000"
+		if n > 1 {
+			date, value = "29.09.2026", "81,5000"
+		}
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<ValCurs Date="` + date + `" name="Foreign Currency Market"><Valute><CharCode>USD</CharCode><Nominal>1</Nominal><Name>USD</Name><Value>` + value + `</Value></Valute></ValCurs>`))
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, t.TempDir()+"/rates.json", time.Hour)
+	provider.fetchRetries = 1
+
+	first, err := provider.Get(context.Background())
+	if err != nil || first.Date != "2026-09-28" {
+		t.Fatalf("Get() = %+v, %v, want date 2026-09-28", first, err)
+	}
+	latest, err := provider.FetchLatest(context.Background())
+	if err != nil || latest.Date != "2026-09-29" || latest.Rates["USD"].Value != 81.5 {
+		t.Fatalf("FetchLatest() = %+v, %v, want the fresh 2026-09-29 document", latest, err)
+	}
+	cached, err := provider.Get(context.Background())
+	if err != nil || cached.Date != "2026-09-29" || calls.Load() != 2 {
+		t.Fatalf("Get() after FetchLatest = %+v, %v (calls %d), want the refreshed cache", cached, err, calls.Load())
+	}
+}
+
+func TestParseCBRDate(t *testing.T) {
+	for raw, want := range map[string]string{"29.09.2026": "2026-09-29", " 01.01.2027 ": "2027-01-01", "": "", "2026-09-29": ""} {
+		if got := parseCBRDate(raw); got != want {
+			t.Fatalf("parseCBRDate(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

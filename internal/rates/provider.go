@@ -25,6 +25,11 @@ type Rate struct {
 }
 
 type Snapshot struct {
+	// Date is the day the rates come into force (the Date attribute of
+	// ValCurs) as "2006-01-02"; empty if the source did not say. After the
+	// Bank of Russia publishes the next day's rates, the latest document is
+	// dated tomorrow.
+	Date      string          `json:"date,omitempty"`
 	FetchedAt time.Time       `json:"fetched_at"`
 	Source    string          `json:"source"`
 	Rates     map[string]Rate `json:"rates"`
@@ -75,6 +80,18 @@ func (p *Provider) Get(ctx context.Context) (Snapshot, error) {
 	}
 
 	return Snapshot{}, err
+}
+
+// FetchLatest downloads the latest rates the Bank of Russia has set,
+// bypassing the cache TTL, and refreshes the cache with them. It is used to
+// notice the next day's rates as soon as they are published.
+func (p *Provider) FetchLatest(ctx context.Context) (Snapshot, error) {
+	snapshot, err := p.fetchAnyCBR(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	_ = p.writeCache(snapshot)
+	return snapshot, nil
 }
 
 // GetForDate returns the rates the Bank of Russia set for date. Rates for past
@@ -267,10 +284,20 @@ func (p *Provider) fetchCBR(ctx context.Context, sourceURL string) (Snapshot, er
 	}
 
 	return Snapshot{
+		Date:      parseCBRDate(parsed.Date),
 		FetchedAt: time.Now().UTC(),
 		Source:    sourceURL,
 		Rates:     rates,
 	}, nil
+}
+
+// parseCBRDate turns "29.09.2026" into "2026-09-29"; anything else gives "".
+func parseCBRDate(raw string) string {
+	date, err := time.Parse("02.01.2006", strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return date.Format("2006-01-02")
 }
 
 func parseSourceURLs(raw string) []string {
@@ -304,6 +331,7 @@ func sleepBeforeRetry(ctx context.Context, attempt int) {
 }
 
 type cbrValCurs struct {
+	Date    string      `xml:"Date,attr"`
 	Valutes []cbrValute `xml:"Valute"`
 }
 

@@ -48,7 +48,7 @@ func (b *Bot) subscriptionHistoricalSnapshots(ctx context.Context, current rates
 	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
 	defer cancel()
 
-	localDate := startOfLocalDay(localNow)
+	localDate := historyBaseDate(current, localNow)
 	snapshots := make([]subscriptionHistoricalSnapshot, 0, 30)
 	var failed []string
 	var lastErr error
@@ -70,6 +70,19 @@ func (b *Bot) subscriptionHistoricalSnapshots(ctx context.Context, current rates
 		b.log.Warn("historical rates unavailable", "days", len(failed), "first", failed[0], "last", failed[len(failed)-1], "error", lastErr)
 	}
 	return snapshots
+}
+
+// historyBaseDate is the day the history counts back from: the user's local
+// date, or the date of current if the Bank of Russia has already published
+// the next day's rates. Otherwise "since yesterday" would compare tomorrow's
+// rate with yesterday's and span two days.
+func historyBaseDate(current rates.Snapshot, localNow time.Time) time.Time {
+	localDate := startOfLocalDay(localNow)
+	rateDate, err := time.ParseInLocation("2006-01-02", current.Date, localNow.Location())
+	if err == nil && rateDate.After(localDate) {
+		return rateDate
+	}
+	return localDate
 }
 
 func startOfLocalDay(value time.Time) time.Time {
@@ -118,8 +131,15 @@ func rateReplyForLanguage(from, to string, snapshot rates.Snapshot, language str
 		updatedAt = snapshot.FetchedAt.UTC().Format("2006-01-02 15:04:05 UTC")
 	}
 
+	// After the Bank of Russia publishes tomorrow's rates, the latest document
+	// is dated tomorrow, so say which day the rate is for.
+	header := tr(language, "Курс:", "Rate:")
+	if snapshot.Date != "" {
+		header = fmt.Sprintf(tr(language, "Курс ЦБ на %s:", "Bank of Russia rate for %s:"), formatRateDate(snapshot.Date))
+	}
 	return fmt.Sprintf(
-		tr(language, "Курс:\n1 %s = %s %s%s\n1 %s = %s %s%s\nОбновлено: %s", "Rate:\n1 %s = %s %s%s\n1 %s = %s %s%s\nUpdated: %s"),
+		tr(language, "%s\n1 %s = %s %s%s\n1 %s = %s %s%s\nОбновлено: %s", "%s\n1 %s = %s %s%s\n1 %s = %s %s%s\nUpdated: %s"),
+		header,
 		from,
 		formatRate(direct),
 		to,

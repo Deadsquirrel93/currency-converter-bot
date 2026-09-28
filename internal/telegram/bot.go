@@ -36,6 +36,12 @@ type Bot struct {
 	blockedNotices *userLimiter
 	subRetry       map[int64]subscriptionRetry
 
+	newRateMu    sync.Mutex
+	newRateSubs  map[int64]newRateSubscription
+	newRateRetry map[int64]subscriptionRetry
+	newRateStore *jsonStore
+	rateWatch    rateWatch
+
 	botID       int64
 	botUsername string
 }
@@ -63,6 +69,9 @@ func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot 
 		limiter:              newUserLimiter(updatesPerMinute, time.Minute),
 		blockedNotices:       newUserLimiter(1, blockedNoticeInterval),
 		subRetry:             map[int64]subscriptionRetry{},
+		newRateSubs:          map[int64]newRateSubscription{},
+		newRateRetry:         map[int64]subscriptionRetry{},
+		newRateStore:         newJSONStore(cfg.NewRateSubsFile),
 		botID:                botIDFromToken(cfg.TelegramToken),
 	}
 	if err := b.loadSessions(); err != nil {
@@ -73,6 +82,9 @@ func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot 
 	}
 	if err := b.loadSubscriptions(); err != nil {
 		b.log.Error("load subscriptions failed", "error", err)
+	}
+	if err := b.loadNewRateSubscriptions(); err != nil {
+		b.log.Error("load new rate subscriptions failed", "error", err)
 	}
 	return b
 }
@@ -235,7 +247,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 	case isCommand(text, "/subscription"):
 		b.showSubscription(ctx, chatID, userID)
 	case isCommand(text, "/unsubscribe"):
-		b.deleteSubscription(ctx, chatID, userID)
+		b.deleteSubscription(ctx, chatID, userID, commandArgs(text))
 	case isCommand(text, "/tz"):
 		b.setTimezone(ctx, chatID, userID, text)
 	case isCommand(text, "/swap"):
@@ -371,8 +383,8 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
 	language := b.userLanguage(userID)
-	russian := "Я конвертирую валюты по официальным курсам ЦБ РФ.\n\nЯзык: %s\nТекущая пара: %s -> %s\n\nКоманды:\n/lang en — сменить язык (en/ru)\n/from USD — выбрать исходную валюту\n/to RUB — выбрать валюту результата\n/swap — поменять валюты местами\n/rate USD RUB — показать текущий курс пары\n/subscribe 09:00 [USD RUB] — ежедневный курс\n/subscription — показать подписку\n/unsubscribe — отключить подписку\n/tz Europe/Moscow — часовой пояс для подписки и истории курса\n/with USD EUR RUB — добавить кнопки перевода\n/with off — отключить кнопки\n/with_modify yes — применять модификаторы для кнопок\n/inline_modify yes — применять модификаторы для явных валют\n/multi 1000 — множитель входной суммы\n/round auto — округление: auto, 0, 2, 4 или 6\n/modify_from 1.5 — процент к входной сумме\n/modify_to 1.5 — процент к результату\n/reset — сбросить настройки (язык и часовой пояс сохранятся)\n/delete — удалить мои данные (настройки, язык, подписку)\n/settings — текущие настройки\n/whoami — показать Telegram ID\n/list — список валют\n/help — эта справка"
-	english := "I convert currencies using the official exchange rates of the Bank of Russia.\n\nLanguage: %s\nCurrent pair: %s -> %s\n\nCommands:\n/lang ru — change language (en/ru)\n/from USD — select the source currency\n/to RUB — select the target currency\n/swap — swap the currencies\n/rate USD RUB — show the current pair rate\n/subscribe 09:00 [USD RUB] — daily rate subscription\n/subscription — show the subscription\n/unsubscribe — disable the subscription\n/tz Europe/Moscow — time zone for the subscription and rate history\n/with USD EUR RUB — add conversion buttons\n/with off — disable the buttons\n/with_modify yes — apply modifiers to buttons\n/inline_modify yes — apply modifiers to explicit currencies\n/multi 1000 — multiply the input amount\n/round auto — rounding: auto, 0, 2, 4, or 6\n/modify_from 1.5 — adjust the input amount by a percentage\n/modify_to 1.5 — adjust the result by a percentage\n/reset — reset settings (language and time zone are preserved)\n/delete — delete my data (settings, language, subscription)\n/settings — show current settings\n/whoami — show your Telegram ID\n/list — list supported currencies\n/help — show this help"
+	russian := "Я конвертирую валюты по официальным курсам ЦБ РФ.\n\nЯзык: %s\nТекущая пара: %s -> %s\n\nКоманды:\n/lang en — сменить язык (en/ru)\n/from USD — выбрать исходную валюту\n/to RUB — выбрать валюту результата\n/swap — поменять валюты местами\n/rate USD RUB — показать текущий курс пары\n/subscribe 09:00 [USD RUB] — ежедневный курс\n/subscribe new [USD RUB] — новый курс ЦБ сразу после установки\n/subscription — показать подписки\n/unsubscribe [daily|new] — отключить подписки\n/tz Europe/Moscow — часовой пояс для подписки и истории курса\n/with USD EUR RUB — добавить кнопки перевода\n/with off — отключить кнопки\n/with_modify yes — применять модификаторы для кнопок\n/inline_modify yes — применять модификаторы для явных валют\n/multi 1000 — множитель входной суммы\n/round auto — округление: auto, 0, 2, 4 или 6\n/modify_from 1.5 — процент к входной сумме\n/modify_to 1.5 — процент к результату\n/reset — сбросить настройки (язык и часовой пояс сохранятся)\n/delete — удалить мои данные (настройки, язык, подписки)\n/settings — текущие настройки\n/whoami — показать Telegram ID\n/list — список валют\n/help — эта справка"
+	english := "I convert currencies using the official exchange rates of the Bank of Russia.\n\nLanguage: %s\nCurrent pair: %s -> %s\n\nCommands:\n/lang ru — change language (en/ru)\n/from USD — select the source currency\n/to RUB — select the target currency\n/swap — swap the currencies\n/rate USD RUB — show the current pair rate\n/subscribe 09:00 [USD RUB] — daily rate subscription\n/subscribe new [USD RUB] — the new Bank of Russia rate as soon as it is set\n/subscription — show subscriptions\n/unsubscribe [daily|new] — disable subscriptions\n/tz Europe/Moscow — time zone for the subscription and rate history\n/with USD EUR RUB — add conversion buttons\n/with off — disable the buttons\n/with_modify yes — apply modifiers to buttons\n/inline_modify yes — apply modifiers to explicit currencies\n/multi 1000 — multiply the input amount\n/round auto — rounding: auto, 0, 2, 4, or 6\n/modify_from 1.5 — adjust the input amount by a percentage\n/modify_to 1.5 — adjust the result by a percentage\n/reset — reset settings (language and time zone are preserved)\n/delete — delete my data (settings, language, subscriptions)\n/settings — show current settings\n/whoami — show your Telegram ID\n/list — list supported currencies\n/help — show this help"
 	text := fmt.Sprintf(tr(language, russian, english), languageName(language), s.From, s.To)
 	if b.cfg.IsAdmin(userID) {
 		text += tr(language, "\n\nАдмин-команды:\n/allow 123456789 — разрешить пользователя по Telegram ID\n/disallow 123456789 — убрать пользователя из runtime whitelist\n/allowed — показать список доступа", "\n\nAdmin commands:\n/allow 123456789 — allow a Telegram user ID\n/disallow 123456789 — remove a user from the runtime whitelist\n/allowed — show the access list")

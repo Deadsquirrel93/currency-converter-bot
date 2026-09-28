@@ -45,6 +45,7 @@ func TestLoadSubscriptionDefaults(t *testing.T) {
 	t.Setenv("RATES_CACHE_TTL", "")
 	t.Setenv("ALLOWED_USERS_FILE", "")
 	t.Setenv("SUBSCRIPTIONS_FILE", "")
+	t.Setenv("NEW_RATE_SUBSCRIPTIONS_FILE", "")
 	t.Setenv("SUBSCRIPTION_TIMEZONE", "")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), ".env"))
@@ -53,6 +54,9 @@ func TestLoadSubscriptionDefaults(t *testing.T) {
 	}
 	if cfg.SubscriptionsFile != "data/subscriptions.json" {
 		t.Fatalf("SubscriptionsFile = %q, want data/subscriptions.json", cfg.SubscriptionsFile)
+	}
+	if cfg.NewRateSubsFile != "data/new_rate_subscriptions.json" {
+		t.Fatalf("NewRateSubsFile = %q, want data/new_rate_subscriptions.json", cfg.NewRateSubsFile)
 	}
 	if cfg.AllowedUsersFile != "data/allowed_users.json" {
 		t.Fatalf("AllowedUsersFile = %q, want data/allowed_users.json", cfg.AllowedUsersFile)

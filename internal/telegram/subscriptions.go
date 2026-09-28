@@ -22,7 +22,11 @@ func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text st
 	language := b.userLanguage(userID)
 	fields := strings.Fields(text)
 	if len(fields) == 2 && isOffValue(fields[1]) {
-		b.deleteSubscription(ctx, chatID, userID)
+		b.deleteSubscription(ctx, chatID, userID, "")
+		return
+	}
+	if len(fields) >= 2 && isNewRateMode(fields[1]) {
+		b.setNewRateSubscription(ctx, chatID, userID, strings.Join(fields[2:], " "))
 		return
 	}
 
@@ -54,21 +58,50 @@ func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text st
 
 func (b *Bot) showSubscription(ctx context.Context, chatID, userID int64) {
 	language := b.userLanguage(userID)
-	subscription, ok := b.getUserSubscription(userID)
-	if !ok {
-		_ = b.sendMessage(ctx, chatID, tr(language, "Подписка выключена. Включить: /subscribe 09:00 или /subscribe 09:00 USD RUB.", "Subscription is off. Enable it with /subscribe 09:00 or /subscribe 09:00 USD RUB."))
+	var parts []string
+	if subscription, ok := b.getUserSubscription(userID); ok {
+		parts = append(parts, fmt.Sprintf(tr(language, "Ежедневная подписка:\nПара: %s -> %s\nВремя: %s (%s)\nЧасовой пояс: /tz\nОтключить: /unsubscribe daily", "Daily subscription:\nPair: %s -> %s\nTime: %s (%s)\nTime zone: /tz\nDisable: /unsubscribe daily"), subscription.From, subscription.To, subscription.Time, b.timezoneLabel(userID, language)))
+	}
+	if subscription, ok := b.getNewRateSubscription(userID); ok {
+		parts = append(parts, fmt.Sprintf(tr(language, "Новый курс ЦБ сразу после установки:\nПара: %s -> %s\nОтключить: /unsubscribe new", "New Bank of Russia rate as soon as it is set:\nPair: %s -> %s\nDisable: /unsubscribe new"), subscription.From, subscription.To))
+	}
+	if len(parts) == 0 {
+		_ = b.sendMessage(ctx, chatID, tr(language, "Подписки выключены. Включить: /subscribe 09:00 USD RUB (каждый день) или /subscribe new USD RUB (сразу после установки нового курса ЦБ).", "Subscriptions are off. Enable one with /subscribe 09:00 USD RUB (every day) or /subscribe new USD RUB (as soon as the Bank of Russia sets a new rate)."))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Подписка:\nПара: %s -> %s\nВремя: %s (%s)\nЧасовой пояс: /tz\nОтключить: /unsubscribe", "Subscription:\nPair: %s -> %s\nTime: %s (%s)\nTime zone: /tz\nDisable: /unsubscribe"), subscription.From, subscription.To, subscription.Time, b.timezoneLabel(userID, language)))
+	_ = b.sendMessage(ctx, chatID, strings.Join(parts, "\n\n"))
 }
 
-func (b *Bot) deleteSubscription(ctx context.Context, chatID, userID int64) {
+// deleteSubscription disables the daily subscription ("daily"), the new rate
+// one ("new") or, without an argument, both.
+func (b *Bot) deleteSubscription(ctx context.Context, chatID, userID int64, which string) {
 	language := b.userLanguage(userID)
-	if b.removeUserSubscription(userID) {
-		_ = b.sendMessage(ctx, chatID, tr(language, "Подписка отключена.", "Subscription disabled."))
-		return
+	switch strings.ToLower(strings.TrimSpace(which)) {
+	case "":
+		daily := b.removeUserSubscription(userID)
+		newRate := b.removeNewRateSubscription(userID)
+		if daily || newRate {
+			_ = b.sendMessage(ctx, chatID, tr(language, "Подписки отключены.", "Subscriptions disabled."))
+			return
+		}
+		_ = b.sendMessage(ctx, chatID, tr(language, "Подписки уже выключены.", "Subscriptions are already disabled."))
+	case "daily", "ежедневная", "ежедневно":
+		if b.removeUserSubscription(userID) {
+			_ = b.sendMessage(ctx, chatID, tr(language, "Ежедневная подписка отключена.", "Daily subscription disabled."))
+			return
+		}
+		_ = b.sendMessage(ctx, chatID, tr(language, "Ежедневная подписка уже выключена.", "Daily subscription is already disabled."))
+	default:
+		if !isNewRateMode(which) {
+			_ = b.sendMessage(ctx, chatID, tr(language, "Укажите, что отключить: /unsubscribe, /unsubscribe daily или /unsubscribe new.", "Specify what to disable: /unsubscribe, /unsubscribe daily, or /unsubscribe new."))
+			return
+		}
+		if b.removeNewRateSubscription(userID) {
+			_ = b.sendMessage(ctx, chatID, tr(language, "Подписка на новый курс отключена.", "New rate subscription disabled."))
+			return
+		}
+		_ = b.sendMessage(ctx, chatID, tr(language, "Подписка на новый курс уже выключена.", "New rate subscription is already disabled."))
 	}
-	_ = b.sendMessage(ctx, chatID, tr(language, "Подписка уже выключена.", "Subscription is already disabled."))
 }
 
 func (b *Bot) getUserSubscription(userID int64) (dailySubscription, bool) {
@@ -109,6 +142,7 @@ func (b *Bot) removeUserSubscription(userID int64) bool {
 
 func (b *Bot) runSubscriptionScheduler(ctx context.Context) {
 	b.sendDueSubscriptions(ctx, time.Now())
+	b.sendNewRates(ctx, time.Now())
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -118,6 +152,7 @@ func (b *Bot) runSubscriptionScheduler(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			b.sendDueSubscriptions(ctx, now)
+			b.sendNewRates(ctx, now)
 		}
 	}
 }
@@ -264,14 +299,22 @@ func parseSubscription(text string, s session) (dailySubscription, error) {
 		}
 	}
 
-	currencyText := strings.Join(fields[1:], " ")
+	from, to, err := parseSubscriptionPair(strings.Join(fields[1:], " "), s)
+	if err != nil {
+		return dailySubscription{}, err
+	}
+	return dailySubscription{From: from, To: to, Time: dailyTime}, nil
+}
+
+// parseSubscriptionPair reads an optional "USD RUB" pair; missing currencies
+// come from the user's settings.
+func parseSubscriptionPair(currencyText string, s session) (string, string, error) {
+	s = normalizeSession(s, "", "")
 	if unknown := firstUnknownCurrencyCodeToken(currencyText); unknown != "" {
-		return dailySubscription{}, unknownCurrencyCodeError(unknown)
+		return "", "", unknownCurrencyCodeError(unknown)
 	}
 	codes := currencyCodesFromText(currencyText)
-
-	from := s.From
-	to := s.To
+	from, to := s.From, s.To
 	switch len(codes) {
 	case 0:
 	case 1:
@@ -280,8 +323,7 @@ func parseSubscription(text string, s session) (dailySubscription, error) {
 		from = codes[0]
 		to = codes[1]
 	}
-
-	return dailySubscription{From: from, To: to, Time: dailyTime}, nil
+	return from, to, nil
 }
 
 func parseDailyTime(raw string) (string, error) {
