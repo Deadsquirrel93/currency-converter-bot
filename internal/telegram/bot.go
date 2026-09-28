@@ -375,7 +375,7 @@ func (b *Bot) helpText(userID int64) string {
 	if b.cfg.IsAdmin(userID) {
 		text += tr(language, "\n\nАдмин-команды:\n/allow 123456789 — разрешить пользователя по Telegram ID\n/disallow 123456789 — убрать пользователя из runtime whitelist\n/allowed — показать список доступа", "\n\nAdmin commands:\n/allow 123456789 — allow a Telegram user ID\n/disallow 123456789 — remove a user from the runtime whitelist\n/allowed — show the access list")
 	}
-	text += tr(language, "\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Для покупок поддерживаются 100х9, 100 x 9 и 100 * 9. Суммы на разных строках будут сложены.\n\nInline mode: @имя_бота 100 usd rub.", "\n\nYou can enter 100 usd to rub, 100$ in rub, or simply 12,345.67. Purchases support 100x9 and 100 * 9. Amounts on separate lines are added together.\n\nInline mode: @bot_name 100 usd rub.")
+	text += tr(language, "\n\nМожно писать сразу: 100 usd to rub, 100$ в руб или просто 12 345,67. Можно считать: 100+50, (12*3)+5, 1 000 / 4, 70 х 5 литров молока. Для вычитания ставьте пробелы: 100 - 50. Суммы на разных строках будут сложены.\n\nInline mode: @имя_бота 100 usd rub.", "\n\nYou can enter 100 usd to rub, 100$ in rub, or simply 12,345.67. You can also calculate: 100+50, (12*3)+5, 1,000 / 4, 70 x 5 liters of milk. Put spaces around a minus: 100 - 50. Amounts on separate lines are added together.\n\nInline mode: @bot_name 100 usd rub.")
 	return text
 }
 

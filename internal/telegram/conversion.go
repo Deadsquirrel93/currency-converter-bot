@@ -332,6 +332,14 @@ func amountErrorText(err error, language string) string {
 			"The line has several numbers (%s), so I am not sure which one to convert. Keep one number per line."), numbers)
 	case errors.Is(err, convert.ErrTooLarge):
 		return tr(language, "Слишком большая сумма.", "The amount is too large.")
+	case errors.Is(err, convert.ErrDivisionByZero):
+		return tr(language, "В выражении деление на ноль. Проверьте его.", "The expression divides by zero. Please check it.")
+	case errors.Is(err, convert.ErrNegativeAmount):
+		return tr(language, "Сумма получилась отрицательной. Проверьте выражение.", "The amount came out negative. Please check the expression.")
+	case errors.Is(err, convert.ErrExpressionTooComplex):
+		return fmt.Sprintf(tr(language,
+			"Слишком сложное выражение: не длиннее %d символов и не больше %d уровней скобок.",
+			"The expression is too complex: keep it within %d characters and %d levels of parentheses."), convert.MaxExpressionLength, convert.MaxExpressionDepth)
 	default:
 		return tr(language, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.", "I cannot find an amount. For example: 12,345.67, or several amounts on separate lines.")
 	}

@@ -41,6 +41,10 @@ func ParseAmount(input string) (float64, error) {
 }
 
 func ParseAmountWith(input string, opts Options) (float64, error) {
+	value, err := parseExpression(input, opts)
+	if !errors.Is(err, errNotExpression) {
+		return value, err
+	}
 	if value, ok := parseMultiplication(input, opts); ok {
 		return value, nil
 	}
@@ -56,8 +60,12 @@ func parsePlainAmount(input string, opts Options) (float64, error) {
 	default:
 		return 0, &AmbiguousError{Numbers: numbers}
 	}
+	return parseNumber(numbers[0], opts)
+}
 
-	value, err := strconv.ParseFloat(normalizeSeparators([]rune(numbers[0]), opts), 64)
+// parseNumber reads one number token found by scanNumber.
+func parseNumber(token string, opts Options) (float64, error) {
+	value, err := strconv.ParseFloat(normalizeSeparators([]rune(token), opts), 64)
 	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 		return 0, errNotNumber
 	}
@@ -79,24 +87,32 @@ func numberTokens(input string) []string {
 			i++
 			continue
 		}
-		var token []rune
-	scan:
-		for i < len(runes) {
-			r := runes[i]
-			switch {
-			case unicode.IsDigit(r):
-				token = append(token, r)
-			case isSeparator(r) && i+1 < len(runes) && unicode.IsDigit(runes[i+1]):
-				token = append(token, r)
-			case isGroupSpace(r) && isGroupOfThree(runes, i+1):
-			default:
-				break scan
-			}
-			i++
-		}
-		tokens = append(tokens, string(token))
+		var token string
+		token, i = scanNumber(runes, i)
+		tokens = append(tokens, token)
 	}
 	return tokens
+}
+
+// scanNumber reads the number that starts with the digit at runes[start] and
+// returns it without group spaces, together with the index right after it.
+func scanNumber(runes []rune, start int) (string, int) {
+	var token []rune
+	i := start
+	for i < len(runes) {
+		r := runes[i]
+		switch {
+		case unicode.IsDigit(r):
+			token = append(token, r)
+		case isSeparator(r) && i+1 < len(runes) && unicode.IsDigit(runes[i+1]):
+			token = append(token, r)
+		case isGroupSpace(r) && isGroupOfThree(runes, i+1):
+		default:
+			return string(token), i
+		}
+		i++
+	}
+	return string(token), i
 }
 
 func isGroupSpace(r rune) bool {
