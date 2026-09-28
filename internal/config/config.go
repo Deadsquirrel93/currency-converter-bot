@@ -48,6 +48,10 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}
 
+	if err := validateTimezone(cfg.SubscriptionTimezone); err != nil {
+		return Config{}, err
+	}
+
 	admins, err := parseUserIDs("TELEGRAM_ADMIN_USER_IDS", os.Getenv("TELEGRAM_ADMIN_USER_IDS"))
 	if err != nil {
 		return Config{}, err
@@ -88,6 +92,18 @@ func (c Config) IsAllowed(userID int64) bool {
 	}
 	_, ok := c.AllowedUsers[userID]
 	return ok
+}
+
+// validateTimezone fails fast on a mistyped SUBSCRIPTION_TIMEZONE instead of
+// letting subscriptions silently fire in UTC.
+func validateTimezone(name string) error {
+	if strings.EqualFold(name, "local") {
+		return nil
+	}
+	if _, err := time.LoadLocation(name); err != nil {
+		return fmt.Errorf("parse SUBSCRIPTION_TIMEZONE: %w", err)
+	}
+	return nil
 }
 
 func loadDotEnv(path string) error {

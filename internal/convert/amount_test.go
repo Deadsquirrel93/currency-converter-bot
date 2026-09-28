@@ -26,6 +26,39 @@ func TestParseAmount(t *testing.T) {
 	}
 }
 
+func TestParseAmountThousandsSeparators(t *testing.T) {
+	tests := []struct {
+		input          string
+		commaThousands bool
+		want           float64
+	}{
+		{"1,000,000", false, 1000000},
+		{"1.000.000", false, 1000000},
+		{"1 000 000", false, 1000000},
+		{"1,000", false, 1},
+		{"1,000", true, 1000},
+		{"12,345 usd", true, 12345},
+		{"1,5", true, 1.5},
+		{"0,500", true, 0.5},
+		{"1.000", true, 1},
+		{"1,000.5", true, 1000.5},
+		{"1.234,56", true, 1234.56},
+		{"1,000,5", false, 1000.5},
+		{"100 usd.", false, 100},
+		{"1,000 x 2", true, 2000},
+	}
+
+	for _, tt := range tests {
+		got, err := ParseAmountWith(tt.input, Options{CommaThousands: tt.commaThousands})
+		if err != nil {
+			t.Fatalf("ParseAmountWith(%q, %v): %v", tt.input, tt.commaThousands, err)
+		}
+		if got != tt.want {
+			t.Fatalf("ParseAmountWith(%q, %v) = %v, want %v", tt.input, tt.commaThousands, got, tt.want)
+		}
+	}
+}
+
 func TestParseAmountMultiplication(t *testing.T) {
 	tests := map[string]float64{
 		"100х9":                900,

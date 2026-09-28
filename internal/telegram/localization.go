@@ -29,6 +29,19 @@ func tr(language, russian, english string) string {
 	return russian
 }
 
+// inlineLanguage prefers the language saved by the user and otherwise uses the
+// Telegram client language ("en-US" -> en), defaulting to Russian.
+func inlineLanguage(saved, telegramCode string) string {
+	if language := normalizeLanguage(saved); language != "" {
+		return language
+	}
+	primary, _, _ := strings.Cut(telegramCode, "-")
+	if language := normalizeLanguage(primary); language != "" {
+		return language
+	}
+	return languageRussian
+}
+
 func (b *Bot) userLanguage(userID int64) string {
 	if language := normalizeLanguage(b.getSession(userID).Language); language != "" {
 		return language

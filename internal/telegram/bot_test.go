@@ -155,6 +155,7 @@ func TestResolveCurrencyToken(t *testing.T) {
 		"$":       "USD",
 		"dollars": "USD",
 		"баксов":  "USD",
+		"баксы":   "USD",
 		"€":       "EUR",
 		"pounds":  "GBP",
 		"руб":     "RUB",
@@ -958,5 +959,35 @@ func TestBotLoadsLegacySingleWithCurrency(t *testing.T) {
 	got := bot.getSession(42)
 	if len(got.With) != 1 || got.With[0] != "USD" {
 		t.Fatalf("With = %#v, want [USD]", got.With)
+	}
+}
+
+func TestInlineLanguage(t *testing.T) {
+	tests := []struct {
+		saved, telegramCode, want string
+	}{
+		{"", "en", languageEnglish},
+		{"", "en-US", languageEnglish},
+		{"", "ru", languageRussian},
+		{"", "uz", languageRussian},
+		{"", "", languageRussian},
+		{"ru", "en", languageRussian},
+		{"en", "ru", languageEnglish},
+	}
+	for _, tt := range tests {
+		if got := inlineLanguage(tt.saved, tt.telegramCode); got != tt.want {
+			t.Fatalf("inlineLanguage(%q, %q) = %q, want %q", tt.saved, tt.telegramCode, got, tt.want)
+		}
+	}
+}
+
+func TestParseConversionInputReadsThousandsByLanguage(t *testing.T) {
+	english, err := parseConversionInput("1,000 usd", session{Language: languageEnglish})
+	if err != nil || english.Amount != 1000 {
+		t.Fatalf("english 1,000 = %v, %v; want 1000", english.Amount, err)
+	}
+	russian, err := parseConversionInput("1,000 usd", session{Language: languageRussian})
+	if err != nil || russian.Amount != 1 {
+		t.Fatalf("russian 1,000 = %v, %v; want 1", russian.Amount, err)
 	}
 }

@@ -302,11 +302,11 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 		_ = b.answerInlineQuery(ctx, query.ID, nil)
 		return
 	}
-	if b.getSession(userID).Language == "" {
-		_ = b.answerInlineQuery(ctx, query.ID, nil)
-		return
-	}
-	language := b.userLanguage(userID)
+	s := b.getSession(userID)
+	// Inline users may never have opened a private chat with the bot, so fall
+	// back to the Telegram client language instead of requiring /lang first.
+	language := inlineLanguage(s.Language, query.From.LanguageCode)
+	s.Language = language
 
 	text := strings.TrimSpace(query.Query)
 	if text == "" {
@@ -314,7 +314,6 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 		return
 	}
 
-	s := b.getSession(userID)
 	request, err := parseConversionInput(text, s)
 	if err != nil {
 		_ = b.answerInlineQuery(ctx, query.ID, nil)
@@ -546,7 +545,8 @@ func (b *Bot) swapCurrencies(ctx context.Context, chatID, userID int64) {
 func (b *Bot) deleteSettings(ctx context.Context, chatID, userID int64) {
 	language := b.userLanguage(userID)
 	b.deleteSession(userID)
-	_ = b.sendMessage(ctx, chatID, tr(language, "Ваши сохраненные настройки удалены. При следующем сообщении нужно будет снова выбрать язык.", "Your saved settings have been deleted. You will need to choose a language again with your next message."))
+	b.removeUserSubscription(userID)
+	_ = b.sendMessage(ctx, chatID, tr(language, "Ваши данные удалены: настройки, выбор языка и подписка. При следующем сообщении нужно будет снова выбрать язык.", "Your data has been deleted: settings, language choice, and subscription. You will need to choose a language again with your next message."))
 }
 
 func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
@@ -558,6 +558,10 @@ func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 		return
 	}
 
+	b.sendRate(ctx, chatID, request.From, request.To, language)
+}
+
+func (b *Bot) sendRate(ctx context.Context, chatID int64, from, to, language string) {
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
@@ -570,7 +574,7 @@ func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 		location = time.Local
 	}
 	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, time.Now().In(location))
-	reply, err := rateReplyWithHistoryForLanguage(request.From, request.To, snapshot, historicalSnapshots, language)
+	reply, err := rateReplyWithHistoryForLanguage(from, to, snapshot, historicalSnapshots, language)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, err.Error()))
 		return
@@ -595,12 +599,20 @@ func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text st
 	subscription.ChatID = chatID
 	subscription.LastSentDate = ""
 	now := time.Now().In(b.subscriptionLocation)
-	if dailyTimePassed(subscription.Time, now) {
+	passedToday := dailyTimePassed(subscription.Time, now)
+	if passedToday {
 		subscription.LastSentDate = subscriptionDate(now)
 	}
 
 	b.setUserSubscription(userID, subscription)
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Готово: буду присылать курс %s -> %s каждый день в %s (%s).", "Done: I will send the %s -> %s rate every day at %s (%s)."), subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
+	confirmation := fmt.Sprintf(tr(language, "Готово: буду присылать курс %s -> %s каждый день в %s (%s).", "Done: I will send the %s -> %s rate every day at %s (%s)."), subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String())
+	if !passedToday {
+		_ = b.sendMessage(ctx, chatID, confirmation)
+		return
+	}
+	confirmation += tr(language, " Сегодня это время уже прошло, поэтому текущий курс присылаю сейчас, следующий — завтра.", " That time has already passed today, so here is the current rate now; the next one comes tomorrow.")
+	_ = b.sendMessage(ctx, chatID, confirmation)
+	b.sendRate(ctx, chatID, subscription.From, subscription.To, language)
 }
 
 func (b *Bot) showSubscription(ctx context.Context, chatID, userID int64) {
@@ -658,8 +670,8 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 func (b *Bot) helpText(userID int64) string {
 	s := b.getSession(userID)
 	language := b.userLanguage(userID)
-	russian := "Я конвертирую валюты по официальным курсам ЦБ РФ.\n\nЯзык: %s\nТекущая пара: %s -> %s\n\nКоманды:\n/lang en — сменить язык (en/ru)\n/from USD — выбрать исходную валюту\n/to RUB — выбрать валюту результата\n/swap — поменять валюты местами\n/rate USD RUB — показать текущий курс пары\n/subscribe 09:00 [USD RUB] — ежедневный курс\n/subscription — показать подписку\n/unsubscribe — отключить подписку\n/with USD EUR RUB — добавить кнопки перевода\n/with off — отключить кнопки\n/with_modify yes — применять модификаторы для кнопок\n/inline_modify yes — применять модификаторы для явных валют\n/multi 1000 — множитель входной суммы\n/round auto — округление: auto, 0, 2, 4 или 6\n/modify_from 1.5 — процент к входной сумме\n/modify_to 1.5 — процент к результату\n/reset — сбросить настройки (язык сохранится)\n/delete — удалить настройки и выбор языка\n/settings — текущие настройки\n/whoami — показать Telegram ID\n/list — список валют\n/help — эта справка"
-	english := "I convert currencies using the official exchange rates of the Bank of Russia.\n\nLanguage: %s\nCurrent pair: %s -> %s\n\nCommands:\n/lang ru — change language (en/ru)\n/from USD — select the source currency\n/to RUB — select the target currency\n/swap — swap the currencies\n/rate USD RUB — show the current pair rate\n/subscribe 09:00 [USD RUB] — daily rate subscription\n/subscription — show the subscription\n/unsubscribe — disable the subscription\n/with USD EUR RUB — add conversion buttons\n/with off — disable the buttons\n/with_modify yes — apply modifiers to buttons\n/inline_modify yes — apply modifiers to explicit currencies\n/multi 1000 — multiply the input amount\n/round auto — rounding: auto, 0, 2, 4, or 6\n/modify_from 1.5 — adjust the input amount by a percentage\n/modify_to 1.5 — adjust the result by a percentage\n/reset — reset settings (language is preserved)\n/delete — delete settings and language choice\n/settings — show current settings\n/whoami — show your Telegram ID\n/list — list supported currencies\n/help — show this help"
+	russian := "Я конвертирую валюты по официальным курсам ЦБ РФ.\n\nЯзык: %s\nТекущая пара: %s -> %s\n\nКоманды:\n/lang en — сменить язык (en/ru)\n/from USD — выбрать исходную валюту\n/to RUB — выбрать валюту результата\n/swap — поменять валюты местами\n/rate USD RUB — показать текущий курс пары\n/subscribe 09:00 [USD RUB] — ежедневный курс\n/subscription — показать подписку\n/unsubscribe — отключить подписку\n/with USD EUR RUB — добавить кнопки перевода\n/with off — отключить кнопки\n/with_modify yes — применять модификаторы для кнопок\n/inline_modify yes — применять модификаторы для явных валют\n/multi 1000 — множитель входной суммы\n/round auto — округление: auto, 0, 2, 4 или 6\n/modify_from 1.5 — процент к входной сумме\n/modify_to 1.5 — процент к результату\n/reset — сбросить настройки (язык сохранится)\n/delete — удалить мои данные (настройки, язык, подписку)\n/settings — текущие настройки\n/whoami — показать Telegram ID\n/list — список валют\n/help — эта справка"
+	english := "I convert currencies using the official exchange rates of the Bank of Russia.\n\nLanguage: %s\nCurrent pair: %s -> %s\n\nCommands:\n/lang ru — change language (en/ru)\n/from USD — select the source currency\n/to RUB — select the target currency\n/swap — swap the currencies\n/rate USD RUB — show the current pair rate\n/subscribe 09:00 [USD RUB] — daily rate subscription\n/subscription — show the subscription\n/unsubscribe — disable the subscription\n/with USD EUR RUB — add conversion buttons\n/with off — disable the buttons\n/with_modify yes — apply modifiers to buttons\n/inline_modify yes — apply modifiers to explicit currencies\n/multi 1000 — multiply the input amount\n/round auto — rounding: auto, 0, 2, 4, or 6\n/modify_from 1.5 — adjust the input amount by a percentage\n/modify_to 1.5 — adjust the result by a percentage\n/reset — reset settings (language is preserved)\n/delete — delete my data (settings, language, subscription)\n/settings — show current settings\n/whoami — show your Telegram ID\n/list — list supported currencies\n/help — show this help"
 	text := fmt.Sprintf(tr(language, russian, english), languageName(language), s.From, s.To)
 	if b.cfg.IsAdmin(userID) {
 		text += tr(language, "\n\nАдмин-команды:\n/allow 123456789 — разрешить пользователя по Telegram ID\n/disallow 123456789 — убрать пользователя из runtime whitelist\n/allowed — показать список доступа", "\n\nAdmin commands:\n/allow 123456789 — allow a Telegram user ID\n/disallow 123456789 — remove a user from the runtime whitelist\n/allowed — show the access list")
@@ -1119,7 +1131,8 @@ type conversionInput struct {
 }
 
 func parseConversionInput(text string, s session) (conversionInput, error) {
-	amount, amountCount, err := convert.ParseAmounts(text)
+	options := convert.Options{CommaThousands: normalizeLanguage(s.Language) == languageEnglish}
+	amount, amountCount, err := convert.ParseAmountsWith(text, options)
 	if err != nil {
 		return conversionInput{}, err
 	}
@@ -2002,7 +2015,7 @@ func botCommandsForLanguage(language string) []botCommand {
 			{Command: "modify_from", Description: "input percentage"},
 			{Command: "modify_to", Description: "result percentage"},
 			{Command: "reset", Description: "reset settings"},
-			{Command: "delete", Description: "delete settings"},
+			{Command: "delete", Description: "delete my data"},
 			{Command: "list", Description: "currency list"},
 		}
 	}
@@ -2030,7 +2043,7 @@ func botCommandsForLanguage(language string) []botCommand {
 		{Command: "modify_from", Description: "процент к входной сумме"},
 		{Command: "modify_to", Description: "процент к результату"},
 		{Command: "reset", Description: "сбросить настройки"},
-		{Command: "delete", Description: "удалить настройки"},
+		{Command: "delete", Description: "удалить мои данные"},
 		{Command: "list", Description: "список валют"},
 	}
 }
@@ -2075,7 +2088,8 @@ type message struct {
 }
 
 type user struct {
-	ID int64 `json:"id"`
+	ID           int64  `json:"id"`
+	LanguageCode string `json:"language_code"`
 }
 
 type chat struct {

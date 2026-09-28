@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,32 +14,33 @@ import (
 	"currency-converter-bot/internal/rates"
 )
 
-func TestSubscriptionsFireInConfiguredTimezone(t *testing.T) {
+type sentMessage struct {
+	ChatID int64  `json:"chat_id"`
+	Text   string `json:"text"`
+}
+
+// newTestBotWithServers returns a bot wired to fake CBR and Telegram servers
+// and a function listing the messages sent so far.
+func newTestBotWithServers(t *testing.T) (*Bot, func() []sentMessage) {
+	t.Helper()
 	cbr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
 <ValCurs><Valute><CharCode>USD</CharCode><Nominal>1</Nominal><Name>USD</Name><Value>90,5</Value></Valute></ValCurs>`))
 	}))
-	defer cbr.Close()
+	t.Cleanup(cbr.Close)
 
 	var mu sync.Mutex
-	var sentTo []int64
+	var messages []sentMessage
 	tg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload struct {
-			ChatID int64 `json:"chat_id"`
-		}
+		var payload sentMessage
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 		mu.Lock()
-		sentTo = append(sentTo, payload.ChatID)
+		messages = append(messages, payload)
 		mu.Unlock()
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
-	defer tg.Close()
-	sent := func() []int64 {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]int64(nil), sentTo...)
-	}
+	t.Cleanup(tg.Close)
 
 	cfg := config.Config{
 		TelegramToken:        testToken,
@@ -49,6 +51,24 @@ func TestSubscriptionsFireInConfiguredTimezone(t *testing.T) {
 	}
 	provider := rates.NewProvider(cbr.URL, t.TempDir()+"/rates.json", time.Hour)
 	bot := New(cfg, provider, slog.New(slog.DiscardHandler))
+	return bot, func() []sentMessage {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]sentMessage(nil), messages...)
+	}
+}
+
+func chatIDs(messages []sentMessage) []int64 {
+	ids := make([]int64, 0, len(messages))
+	for _, m := range messages {
+		ids = append(ids, m.ChatID)
+	}
+	return ids
+}
+
+func TestSubscriptionsFireInConfiguredTimezone(t *testing.T) {
+	bot, messages := newTestBotWithServers(t)
+	sent := func() []int64 { return chatIDs(messages()) }
 	if got := bot.subscriptionLocation.String(); got != "Asia/Tashkent" {
 		t.Fatalf("subscription location = %q, want Asia/Tashkent", got)
 	}
@@ -79,5 +99,43 @@ func TestSubscriptionsFireInConfiguredTimezone(t *testing.T) {
 	}
 	if sub, _ := bot.getUserSubscription(2); sub.LastSentDate != "2026-05-11" {
 		t.Fatalf("LastSentDate = %q, want Tashkent date 2026-05-11", sub.LastSentDate)
+	}
+}
+
+func TestSubscribeWithPassedTimeSendsRateNow(t *testing.T) {
+	bot, messages := newTestBotWithServers(t)
+	bot.saveLanguage(42, languageRussian)
+
+	// 00:00 has always passed, so the first daily message would only come tomorrow.
+	bot.setSubscription(t.Context(), 100, 42, "/subscribe 00:00 USD RUB")
+
+	got := messages()
+	if len(got) != 2 {
+		t.Fatalf("sent %d messages, want confirmation and current rate: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Text, "следующий — завтра") {
+		t.Fatalf("confirmation = %q, want note about tomorrow", got[0].Text)
+	}
+	if !strings.Contains(got[1].Text, "1 USD = 90,50 RUB") {
+		t.Fatalf("second message = %q, want current rate", got[1].Text)
+	}
+	sub, ok := bot.getUserSubscription(42)
+	if !ok || sub.LastSentDate != subscriptionDate(time.Now().In(bot.subscriptionLocation)) {
+		t.Fatalf("subscription = %+v, want LastSentDate today so the scheduler does not repeat it", sub)
+	}
+}
+
+func TestDeleteSettingsRemovesSubscription(t *testing.T) {
+	bot, _ := newTestBotWithServers(t)
+	bot.saveLanguage(42, languageEnglish)
+	bot.setUserSubscription(42, dailySubscription{ChatID: 100, From: "USD", To: "RUB", Time: "09:00"})
+
+	bot.deleteSettings(t.Context(), 100, 42)
+
+	if _, ok := bot.getUserSubscription(42); ok {
+		t.Fatal("/delete must remove the subscription")
+	}
+	if got := bot.getSession(42).Language; got != "" {
+		t.Fatalf("language = %q, want it removed", got)
 	}
 }

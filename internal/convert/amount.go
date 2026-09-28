@@ -10,47 +10,114 @@ import (
 
 var ErrNoAmount = errors.New("no amount found")
 
-func ParseAmount(input string) (float64, error) {
-	if value, ok := parseMultiplication(input); ok {
-		return value, nil
-	}
-	return parsePlainAmount(input)
+// Options tunes how ambiguous number formats are read.
+type Options struct {
+	// CommaThousands reads a single comma followed by exactly three digits as a
+	// thousands separator ("1,000" = 1000, English style). When false, such a
+	// comma is decimal ("1,000" = 1, Russian style).
+	CommaThousands bool
 }
 
-func parsePlainAmount(input string) (float64, error) {
-	var cleaned []rune
-	separatorIndex := -1
+func ParseAmount(input string) (float64, error) {
+	return ParseAmountWith(input, Options{})
+}
 
+func ParseAmountWith(input string, opts Options) (float64, error) {
+	if value, ok := parseMultiplication(input, opts); ok {
+		return value, nil
+	}
+	return parsePlainAmount(input, opts)
+}
+
+func parsePlainAmount(input string, opts Options) (float64, error) {
+	var cleaned []rune
 	for _, r := range input {
 		switch {
 		case unicode.IsDigit(r):
 			cleaned = append(cleaned, r)
-		case (r == '.' || r == ',') && len(cleaned) > 0:
-			cleaned = append(cleaned, '.')
-			separatorIndex = len(cleaned) - 1
+		case isSeparator(r) && len(cleaned) > 0:
+			cleaned = append(cleaned, r)
 		}
 	}
-
+	for len(cleaned) > 0 && isSeparator(cleaned[len(cleaned)-1]) {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
 	if len(cleaned) == 0 {
 		return 0, ErrNoAmount
 	}
 
-	var normalized []rune
-	for i, r := range cleaned {
-		if r == '.' && i != separatorIndex {
-			continue
-		}
-		normalized = append(normalized, r)
-	}
-
-	value, err := strconv.ParseFloat(string(normalized), 64)
+	value, err := strconv.ParseFloat(normalizeSeparators(cleaned, opts), 64)
 	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 		return 0, ErrNoAmount
 	}
 	return value, nil
 }
 
-func parseMultiplication(input string) (float64, bool) {
+// normalizeSeparators turns digits with '.'/',' separators into a string that
+// strconv.ParseFloat understands. By default the last separator is decimal and
+// the others group thousands; repeated identical separators in groups of three
+// ("1,000,000", "1.000.000") are all treated as thousands separators.
+func normalizeSeparators(cleaned []rune, opts Options) string {
+	var separators []int
+	for i, r := range cleaned {
+		if isSeparator(r) {
+			separators = append(separators, i)
+		}
+	}
+	if len(separators) == 0 {
+		return string(cleaned)
+	}
+
+	decimal := separators[len(separators)-1]
+	if thousandsGrouped(cleaned, separators) {
+		multiple := len(separators) > 1
+		englishThousands := opts.CommaThousands && cleaned[decimal] == ','
+		if multiple || englishThousands {
+			decimal = -1
+		}
+	}
+
+	var normalized []rune
+	for i, r := range cleaned {
+		switch {
+		case i == decimal:
+			normalized = append(normalized, '.')
+		case isSeparator(r):
+		default:
+			normalized = append(normalized, r)
+		}
+	}
+	return string(normalized)
+}
+
+// thousandsGrouped reports whether all separators are the same character and
+// split the number into a 1-3 digit head (not starting with 0) followed by
+// groups of exactly three digits.
+func thousandsGrouped(cleaned []rune, separators []int) bool {
+	first := separators[0]
+	if first == 0 || first > 3 || cleaned[0] == '0' {
+		return false
+	}
+	for n, index := range separators {
+		if cleaned[index] != cleaned[first] {
+			return false
+		}
+		end := len(cleaned)
+		if n+1 < len(separators) {
+			end = separators[n+1]
+		}
+		if end-index-1 != 3 {
+			return false
+		}
+	}
+	return true
+}
+
+func isSeparator(r rune) bool {
+	return r == '.' || r == ','
+}
+
+func parseMultiplication(input string, opts Options) (float64, bool) {
 	runes := []rune(input)
 	for i, r := range runes {
 		if !isMultiplicationSign(r) {
@@ -66,11 +133,11 @@ func parseMultiplication(input string) (float64, bool) {
 			continue
 		}
 
-		leftValue, err := parsePlainAmount(left)
+		leftValue, err := parsePlainAmount(left, opts)
 		if err != nil {
 			continue
 		}
-		rightValue, err := parsePlainAmount(right)
+		rightValue, err := parsePlainAmount(right, opts)
 		if err != nil {
 			continue
 		}
@@ -124,6 +191,10 @@ func isAmountRune(r rune) bool {
 }
 
 func ParseAmounts(input string) (float64, int, error) {
+	return ParseAmountsWith(input, Options{})
+}
+
+func ParseAmountsWith(input string, opts Options) (float64, int, error) {
 	var total float64
 	count := 0
 
@@ -133,7 +204,7 @@ func ParseAmounts(input string) (float64, int, error) {
 			continue
 		}
 
-		amount, err := ParseAmount(line)
+		amount, err := ParseAmountWith(line, opts)
 		if err != nil {
 			if errors.Is(err, ErrNoAmount) {
 				continue

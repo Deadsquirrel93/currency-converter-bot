@@ -61,3 +61,19 @@ func TestLoadSubscriptionDefaults(t *testing.T) {
 		t.Fatalf("SubscriptionTimezone = %q, want Asia/Tashkent", cfg.SubscriptionTimezone)
 	}
 }
+
+func TestLoadRejectsUnknownTimezone(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "token")
+	t.Setenv("TELEGRAM_ADMIN_USER_IDS", "")
+	t.Setenv("TELEGRAM_ALLOWED_USER_IDS", "")
+	t.Setenv("SUBSCRIPTION_TIMEZONE", "Asia/Tashkennt")
+
+	if _, err := Load(filepath.Join(t.TempDir(), ".env")); err == nil {
+		t.Fatal("Load() error = nil, want error for unknown timezone")
+	}
+
+	t.Setenv("SUBSCRIPTION_TIMEZONE", "local")
+	if _, err := Load(filepath.Join(t.TempDir(), ".env")); err != nil {
+		t.Fatalf("Load() with local timezone: %v", err)
+	}
+}
