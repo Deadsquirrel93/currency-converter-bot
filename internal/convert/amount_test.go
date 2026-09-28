@@ -1,6 +1,10 @@
 package convert
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestParseAmount(t *testing.T) {
 	tests := map[string]float64{
@@ -10,7 +14,6 @@ func TestParseAmount(t *testing.T) {
 		"3.5":           3.5,
 		"3,5":           3.5,
 		"abc99":         99,
-		"1O0 usd":       10,
 		"100lira":       100,
 		"100 долларов":  100,
 	}
@@ -71,7 +74,8 @@ func TestParseAmountMultiplication(t *testing.T) {
 		"1,5 х 2":              3,
 		"1.234,56 * 2":         2469.12,
 		"молоко 70 х 5 литров": 350,
-		"100 usd х 9":          1009,
+		"100 usd х 9":          900,
+		"100$ x 9":             900,
 		"100x":                 100,
 	}
 
@@ -113,15 +117,47 @@ func TestParseAmountsSumsMultiplications(t *testing.T) {
 }
 
 func TestParseAmountsDoesNotReplaceLetters(t *testing.T) {
-	total, count, err := ParseAmounts("1O0\nl5\nЗ,5")
+	total, count, err := ParseAmounts("l5\nЗ,5")
 	if err != nil {
 		t.Fatalf("ParseAmounts() error = %v", err)
 	}
-	if total != 20 {
-		t.Fatalf("ParseAmounts() total = %v, want %v", total, 20.0)
+	if total != 10 {
+		t.Fatalf("ParseAmounts() total = %v, want %v", total, 10.0)
 	}
-	if count != 3 {
-		t.Fatalf("ParseAmounts() count = %d, want %d", count, 3)
+	if count != 2 {
+		t.Fatalf("ParseAmounts() count = %d, want %d", count, 2)
+	}
+}
+
+func TestParseAmountRejectsSeveralNumbers(t *testing.T) {
+	for input, want := range map[string][]string{
+		"iPhone 15 за 1000 usd": {"15", "1000"},
+		"2 кофе по 350":         {"2", "350"},
+		"1O0":                   {"1", "0"},
+		"100 box 2":             {"100", "2"},
+	} {
+		_, err := ParseAmount(input)
+		var ambiguous *AmbiguousError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("ParseAmount(%q) error = %v, want AmbiguousError", input, err)
+		}
+		if strings.Join(ambiguous.Numbers, ",") != strings.Join(want, ",") {
+			t.Fatalf("ParseAmount(%q) numbers = %v, want %v", input, ambiguous.Numbers, want)
+		}
+	}
+	if _, _, err := ParseAmounts("100\n2 кофе по 350"); err == nil {
+		t.Fatal("ParseAmounts() must reject a message with an ambiguous line")
+	}
+}
+
+func TestParseAmountRejectsTooLarge(t *testing.T) {
+	for _, input := range []string{"99999999999999999999999 usd", "1 000 000 000 000 000 000"} {
+		if _, err := ParseAmount(input); !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("ParseAmount(%q) error = %v, want ErrTooLarge", input, err)
+		}
+	}
+	if _, _, err := ParseAmounts("900000000000000\n900000000000000"); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("ParseAmounts() sum error = %v, want ErrTooLarge", err)
 	}
 }
 
@@ -133,9 +169,17 @@ func TestParseAmountsNoAmount(t *testing.T) {
 }
 
 func TestFormatMoney(t *testing.T) {
-	got := FormatMoney(1234567.895)
-	want := "1 234 567,90"
-	if got != want {
-		t.Fatalf("FormatMoney() = %q, want %q", got, want)
+	tests := map[float64]string{
+		1234567.895: "1 234 567,90",
+		0:           "0,00",
+		-0.001:      "0,00",
+		-1234.5:     "-1 234,50",
+		999.999:     "1 000,00",
+		1.28e19:     "12 800 000 000 000 000 000,00",
+	}
+	for value, want := range tests {
+		if got := FormatMoney(value); got != want {
+			t.Fatalf("FormatMoney(%v) = %q, want %q", value, got, want)
+		}
 	}
 }
