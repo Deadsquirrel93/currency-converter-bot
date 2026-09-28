@@ -119,8 +119,8 @@ func TestLanguageKeyboardUsesFlagsAndCallbackData(t *testing.T) {
 
 func TestEnglishLocalizedTexts(t *testing.T) {
 	s := session{Language: "en", From: "USD", To: "RUB", Multiplier: 1}
-	settings := settingsTextForLanguage(s, rates.Snapshot{}, languageEnglish)
-	for _, want := range []string{"Settings:", "Language: 🇬🇧 English", "Pair: USD -> RUB", "Rates updated: no data"} {
+	settings := settingsTextForLanguage(s, rates.Snapshot{}, languageEnglish, "Europe/Moscow (default)")
+	for _, want := range []string{"Settings:", "Language: 🇬🇧 English", "Pair: USD -> RUB", "Rates updated: no data", "Time zone: Europe/Moscow (default)"} {
 		if !strings.Contains(settings, want) {
 			t.Fatalf("English settings must contain %q, got:\n%s", want, settings)
 		}
@@ -571,6 +571,7 @@ func TestSettingsText(t *testing.T) {
 		Round:             "4",
 		ModifyFromPercent: 1.5,
 		ModifyToPercent:   -2,
+		Timezone:          "Asia/Tashkent",
 	}, rates.Snapshot{FetchedAt: time.Date(2026, 5, 10, 9, 30, 0, 0, time.UTC)})
 
 	for _, want := range []string{
@@ -583,6 +584,7 @@ func TestSettingsText(t *testing.T) {
 		"Округление результата: 4",
 		"Модификатор входной суммы: +1,5%",
 		"Модификатор результата: -2%",
+		"Часовой пояс: Asia/Tashkent",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("settingsText() must contain %q, got:\n%s", want, text)
@@ -603,7 +605,7 @@ func TestBotCommands(t *testing.T) {
 		got[command.Command] = true
 	}
 
-	for _, want := range []string{"start", "help", "lang", "whoami", "allow", "disallow", "allowed", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
+	for _, want := range []string{"start", "help", "lang", "whoami", "allow", "disallow", "allowed", "settings", "from", "to", "swap", "rate", "subscribe", "subscription", "unsubscribe", "tz", "reset", "delete", "with", "with_modify", "inline_modify", "multi", "round", "modify_from", "modify_to", "list"} {
 		if !got[want] {
 			t.Fatalf("botCommands() must contain %q", want)
 		}
@@ -850,7 +852,7 @@ func TestParseTelegramUserIDArgsRejectsUsername(t *testing.T) {
 }
 
 func TestDueSubscriptionsSkipsAlreadySentToday(t *testing.T) {
-	bot := New(config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bot := New(config.Config{SubscriptionTimezone: "UTC"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	bot.subscriptions = map[int64]dailySubscription{
 		1: {ChatID: 100, From: "USD", To: "RUB", Time: "09:00"},
 		2: {ChatID: 200, From: "EUR", To: "RUB", Time: "09:00", LastSentDate: "2026-05-10"},

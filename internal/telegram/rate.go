@@ -18,10 +18,12 @@ func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 		return
 	}
 
-	b.sendRate(ctx, chatID, request.From, request.To, language)
+	b.sendRate(ctx, chatID, request.From, request.To, language, b.userLocation(userID))
 }
 
-func (b *Bot) sendRate(ctx context.Context, chatID int64, from, to, language string) {
+// sendRate sends the rate with its 30-day history; days are counted in
+// location, the user's time zone.
+func (b *Bot) sendRate(ctx context.Context, chatID int64, from, to, language string, location *time.Location) {
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
@@ -29,10 +31,6 @@ func (b *Bot) sendRate(ctx context.Context, chatID int64, from, to, language str
 		return
 	}
 
-	location := b.subscriptionLocation
-	if location == nil {
-		location = time.Local
-	}
 	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, time.Now().In(location))
 	reply, err := rateReplyWithHistoryForLanguage(from, to, snapshot, historicalSnapshots, language)
 	if err != nil {

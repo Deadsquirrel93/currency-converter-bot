@@ -133,7 +133,7 @@ func TestSubscriptionBacksOffOnTransientErrors(t *testing.T) {
 }
 
 func TestDisallowedUserDoesNotReceiveSubscription(t *testing.T) {
-	bot := New(config.Config{AdminUsers: map[int64]struct{}{1: {}}}, nil, slog.New(slog.DiscardHandler))
+	bot := New(config.Config{AdminUsers: map[int64]struct{}{1: {}}, SubscriptionTimezone: "UTC"}, nil, slog.New(slog.DiscardHandler))
 	bot.addAllowedUserIDs([]int64{2})
 	bot.subscriptions = map[int64]dailySubscription{2: {ChatID: 2, From: "USD", To: "RUB", Time: "09:00"}}
 	now := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)

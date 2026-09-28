@@ -22,6 +22,8 @@ type session struct {
 	Round             string   `json:"round,omitempty"`
 	ModifyFromPercent float64  `json:"modify_from_percent"`
 	ModifyToPercent   float64  `json:"modify_to_percent"`
+	// Timezone is an IANA name or "UTC+03:00"; empty means SUBSCRIPTION_TIMEZONE.
+	Timezone string `json:"timezone,omitempty"`
 }
 
 func (s *session) UnmarshalJSON(raw []byte) error {
@@ -237,16 +239,18 @@ func (b *Bot) showSettings(ctx context.Context, chatID, userID int64) {
 	snapshot, err := b.rates.Get(ctx)
 	if err != nil {
 		b.log.Error("rates unavailable", "error", err)
-		_ = b.sendMessage(ctx, chatID, settingsTextForLanguage(s, rates.Snapshot{}, b.userLanguage(userID)))
-		return
+		snapshot = rates.Snapshot{}
 	}
-	_ = b.sendMessage(ctx, chatID, settingsTextForLanguage(s, snapshot, b.userLanguage(userID)))
+	language := b.userLanguage(userID)
+	_ = b.sendMessage(ctx, chatID, settingsTextForLanguage(s, snapshot, language, b.timezoneLabel(userID, language)))
 }
 
 func (b *Bot) resetSettings(ctx context.Context, chatID, userID int64) {
 	language := b.userLanguage(userID)
+	timezone := b.getSession(userID).Timezone
 	s := defaultSession(b.cfg.DefaultFrom, b.cfg.DefaultTo)
 	s.Language = language
+	s.Timezone = timezone
 	b.setSession(userID, s)
 	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Настройки сброшены: %s -> %s.", "Settings reset: %s -> %s."), s.From, s.To))
 }
@@ -405,6 +409,7 @@ func normalizeSession(s session, defaultFrom, defaultTo string) session {
 	s.To = strings.ToUpper(strings.TrimSpace(s.To))
 	s.With = normalizeCurrencyList(s.With)
 	s.Round, _ = parseRoundMode(s.Round)
+	s.Timezone = strings.TrimSpace(s.Timezone)
 	if s.Multiplier == 0 {
 		s.Multiplier = 1
 	}
@@ -434,10 +439,10 @@ func formatRoundMode(roundMode string) string {
 }
 
 func settingsText(s session, snapshot rates.Snapshot) string {
-	return settingsTextForLanguage(s, snapshot, languageRussian)
+	return settingsTextForLanguage(s, snapshot, languageRussian, s.Timezone)
 }
 
-func settingsTextForLanguage(s session, snapshot rates.Snapshot, language string) string {
+func settingsTextForLanguage(s session, snapshot rates.Snapshot, language, timezone string) string {
 	s = normalizeSession(s, "", "")
 	updatedAt := tr(language, "нет данных", "no data")
 	if !snapshot.FetchedAt.IsZero() {
@@ -449,7 +454,7 @@ func settingsTextForLanguage(s session, snapshot rates.Snapshot, language string
 	}
 
 	return fmt.Sprintf(
-		tr(language, "Настройки:\nЯзык: %s\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМодификаторы для явных валют: %s\nМножитель входной суммы: %s\nОкругление результата: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s", "Settings:\nLanguage: %s\nPair: %s -> %s\nRates updated: %s\nConversion buttons: %s\nButton modifiers: %s\nExplicit-currency modifiers: %s\nInput multiplier: %s\nResult rounding: %s\nInput modifier: %s\nResult modifier: %s"),
+		tr(language, "Настройки:\nЯзык: %s\nПара: %s -> %s\nКурсы обновлены: %s\nКнопки перевода: %s\nМодификаторы для кнопок: %s\nМодификаторы для явных валют: %s\nМножитель входной суммы: %s\nОкругление результата: %s\nМодификатор входной суммы: %s\nМодификатор результата: %s\nЧасовой пояс: %s", "Settings:\nLanguage: %s\nPair: %s -> %s\nRates updated: %s\nConversion buttons: %s\nButton modifiers: %s\nExplicit-currency modifiers: %s\nInput multiplier: %s\nResult rounding: %s\nInput modifier: %s\nResult modifier: %s\nTime zone: %s"),
 		languageName(language),
 		s.From,
 		s.To,
@@ -461,6 +466,7 @@ func settingsTextForLanguage(s session, snapshot rates.Snapshot, language string
 		formatRoundMode(s.Round),
 		formatPercent(s.ModifyFromPercent),
 		formatPercent(s.ModifyToPercent),
+		timezone,
 	)
 }
 
@@ -501,7 +507,14 @@ func (b *Bot) loadSessions() error {
 		}
 		b.mu.Lock()
 		for userID, s := range sessions {
-			b.sessions[userID] = normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
+			s = normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
+			if s.Timezone != "" {
+				if _, err := loadTimezone(s.Timezone); err != nil {
+					b.log.Warn("unknown user time zone, using the default", "user_id", userID, "timezone", s.Timezone, "error", err)
+					s.Timezone = ""
+				}
+			}
+			b.sessions[userID] = s
 		}
 		b.mu.Unlock()
 		return nil

@@ -34,21 +34,22 @@ func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text st
 	}
 	subscription.ChatID = chatID
 	subscription.LastSentDate = ""
-	now := time.Now().In(b.subscriptionLocation)
+	location := b.userLocation(userID)
+	now := time.Now().In(location)
 	passedToday := dailyTimePassed(subscription.Time, now)
 	if passedToday {
 		subscription.LastSentDate = subscriptionDate(now)
 	}
 
 	b.setUserSubscription(userID, subscription)
-	confirmation := fmt.Sprintf(tr(language, "Готово: буду присылать курс %s -> %s каждый день в %s (%s).", "Done: I will send the %s -> %s rate every day at %s (%s)."), subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String())
+	confirmation := fmt.Sprintf(tr(language, "Готово: буду присылать курс %s -> %s каждый день в %s (%s, изменить: /tz).", "Done: I will send the %s -> %s rate every day at %s (%s, change it with /tz)."), subscription.From, subscription.To, subscription.Time, location.String())
 	if !passedToday {
 		_ = b.sendMessage(ctx, chatID, confirmation)
 		return
 	}
 	confirmation += tr(language, " Сегодня это время уже прошло, поэтому текущий курс присылаю сейчас, следующий — завтра.", " That time has already passed today, so here is the current rate now; the next one comes tomorrow.")
 	_ = b.sendMessage(ctx, chatID, confirmation)
-	b.sendRate(ctx, chatID, subscription.From, subscription.To, language)
+	b.sendRate(ctx, chatID, subscription.From, subscription.To, language, location)
 }
 
 func (b *Bot) showSubscription(ctx context.Context, chatID, userID int64) {
@@ -58,7 +59,7 @@ func (b *Bot) showSubscription(ctx context.Context, chatID, userID int64) {
 		_ = b.sendMessage(ctx, chatID, tr(language, "Подписка выключена. Включить: /subscribe 09:00 или /subscribe 09:00 USD RUB.", "Subscription is off. Enable it with /subscribe 09:00 or /subscribe 09:00 USD RUB."))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Подписка:\nПара: %s -> %s\nВремя: %s (%s)\nОтключить: /unsubscribe", "Subscription:\nPair: %s -> %s\nTime: %s (%s)\nDisable: /unsubscribe"), subscription.From, subscription.To, subscription.Time, b.subscriptionLocation.String()))
+	_ = b.sendMessage(ctx, chatID, fmt.Sprintf(tr(language, "Подписка:\nПара: %s -> %s\nВремя: %s (%s)\nЧасовой пояс: /tz\nОтключить: /unsubscribe", "Subscription:\nPair: %s -> %s\nTime: %s (%s)\nTime zone: /tz\nDisable: /unsubscribe"), subscription.From, subscription.To, subscription.Time, b.timezoneLabel(userID, language)))
 }
 
 func (b *Bot) deleteSubscription(ctx context.Context, chatID, userID int64) {
@@ -126,12 +127,7 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 		return
 	}
 
-	location := b.subscriptionLocation
-	if location == nil {
-		location = time.Local
-	}
-	localNow := now.In(location)
-	due := b.dueSubscriptions(localNow)
+	due := b.dueSubscriptions(now)
 	if len(due) == 0 {
 		return
 	}
@@ -141,9 +137,17 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 		b.log.Error("rates unavailable for subscriptions", "error", err)
 		return
 	}
-	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, localNow)
+	// Users in different zones can be on different local days; the history is
+	// collected once per local date.
+	histories := map[string][]subscriptionHistoricalSnapshot{}
 
 	for userID, subscription := range due {
+		today := subscriptionDate(subscription.localNow)
+		historicalSnapshots, ok := histories[today]
+		if !ok {
+			historicalSnapshots = b.subscriptionHistoricalSnapshots(ctx, snapshot, subscription.localNow)
+			histories[today] = historicalSnapshots
+		}
 		language := b.userLanguage(userID)
 		reply, err := rateReplyWithHistoryForLanguage(subscription.From, subscription.To, snapshot, historicalSnapshots, language)
 		if err != nil {
@@ -152,22 +156,44 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 		}
 		text := fmt.Sprintf(tr(language, "Ежедневный курс %s -> %s\n\n%s", "Daily rate %s -> %s\n\n%s"), subscription.From, subscription.To, reply)
 		if err := b.sendMessage(ctx, subscription.ChatID, text); err != nil {
-			b.handleSubscriptionSendError(userID, subscription, localNow, err)
+			b.handleSubscriptionSendError(userID, subscription.dailySubscription, subscription.localNow, err)
 			continue
 		}
-		b.markSubscriptionSent(userID, subscription, subscriptionDate(localNow))
+		b.markSubscriptionSent(userID, subscription.dailySubscription, today)
 	}
 }
 
-func (b *Bot) dueSubscriptions(now time.Time) map[int64]dailySubscription {
-	today := subscriptionDate(now)
-	b.subMu.RLock()
-	defer b.subMu.RUnlock()
+// dueSubscription is a subscription to send now, with the current time in the
+// user's time zone.
+type dueSubscription struct {
+	dailySubscription
+	localNow time.Time
+}
 
-	due := map[int64]dailySubscription{}
+// dueSubscriptions checks every subscription against the local time and date
+// of its user, so LastSentDate and retries follow the user's own day.
+func (b *Bot) dueSubscriptions(now time.Time) map[int64]dueSubscription {
+	type candidate struct {
+		subscription dailySubscription
+		retry        subscriptionRetry
+		retrying     bool
+	}
+	b.subMu.RLock()
+	candidates := make(map[int64]candidate, len(b.subscriptions))
 	for userID, subscription := range b.subscriptions {
-		subscription = normalizeSubscription(subscription)
-		if subscription.ChatID == 0 || subscription.Time == "" || subscription.LastSentDate == today {
+		retry, retrying := b.subRetry[userID]
+		candidates[userID] = candidate{subscription: normalizeSubscription(subscription), retry: retry, retrying: retrying}
+	}
+	b.subMu.RUnlock()
+
+	due := map[int64]dueSubscription{}
+	for userID, c := range candidates {
+		if c.subscription.ChatID == 0 || c.subscription.Time == "" {
+			continue
+		}
+		localNow := now.In(b.userLocation(userID))
+		today := subscriptionDate(localNow)
+		if c.subscription.LastSentDate == today {
 			continue
 		}
 		// Access revoked with /disallow: keep the subscription (it resumes if
@@ -175,11 +201,11 @@ func (b *Bot) dueSubscriptions(now time.Time) map[int64]dailySubscription {
 		if !b.isAllowed(userID) {
 			continue
 		}
-		if retry, ok := b.subRetry[userID]; ok && retry.Date == today && now.Before(retry.Next) {
+		if c.retrying && c.retry.Date == today && localNow.Before(c.retry.Next) {
 			continue
 		}
-		if dailyTimePassed(subscription.Time, now) {
-			due[userID] = subscription
+		if dailyTimePassed(c.subscription.Time, localNow) {
+			due[userID] = dueSubscription{dailySubscription: c.subscription, localNow: localNow}
 		}
 	}
 	return due
