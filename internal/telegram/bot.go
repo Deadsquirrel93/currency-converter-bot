@@ -965,13 +965,16 @@ func (b *Bot) setBotCommands(ctx context.Context) error {
 	return nil
 }
 
-func (b *Bot) post(ctx context.Context, method string, payload any, target any) error {
+func (b *Bot) post(ctx context.Context, method string, payload any, target any) (err error) {
+	// The token is part of the URL, and net/http errors quote the URL verbatim.
+	defer func() { err = redactSecret(err, b.cfg.TelegramToken) }()
+
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	url := fmt.Sprintf("%s/bot%s/%s", b.cfg.TelegramAPI, b.cfg.TelegramToken, method)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	endpoint := fmt.Sprintf("%s/bot%s/%s", b.cfg.TelegramAPI, b.cfg.TelegramToken, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
