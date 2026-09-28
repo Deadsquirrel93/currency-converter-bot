@@ -6,6 +6,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	// Embed the IANA timezone database: the alpine runtime image has no tzdata,
+	// so SUBSCRIPTION_TIMEZONE would otherwise silently fall back to UTC.
+	_ "time/tzdata"
 
 	"currency-converter-bot/internal/config"
 	"currency-converter-bot/internal/rates"
