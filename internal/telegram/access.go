@@ -3,10 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,7 +50,7 @@ func (b *Bot) allowUsers(ctx context.Context, chatID, adminID int64, text string
 
 	ids, err := parseTelegramUserIDArgs(commandArgs(text))
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(b.userLanguage(adminID), err.Error(), "Specify a numeric Telegram ID, for example /allow 123456789."))
+		_ = b.sendMessage(ctx, chatID, errorText(err, b.userLanguage(adminID)))
 		return
 	}
 
@@ -76,7 +73,7 @@ func (b *Bot) disallowUsers(ctx context.Context, chatID, adminID int64, text str
 
 	ids, err := parseTelegramUserIDArgs(commandArgs(text))
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(b.userLanguage(adminID), err.Error(), "Specify a numeric Telegram ID, for example /disallow 123456789."))
+		_ = b.sendMessage(ctx, chatID, errorText(err, b.userLanguage(adminID)))
 		return
 	}
 
@@ -149,11 +146,10 @@ func (b *Bot) addAllowedUserIDs(ids []int64) ([]int64, []int64) {
 		b.allowedUsers[id] = struct{}{}
 		added = append(added, id)
 	}
-	snapshot := copyIDSet(b.allowedUsers)
 	b.accessMu.Unlock()
 
 	if len(added) > 0 {
-		if err := b.writeAllowedUsers(snapshot); err != nil {
+		if err := b.saveAllowedUsers(); err != nil {
 			b.log.Error("save allowed users failed", "path", b.cfg.AllowedUsersFile, "error", err)
 		}
 	}
@@ -182,11 +178,10 @@ func (b *Bot) removeAllowedUserIDs(ids []int64) ([]int64, []int64, []int64) {
 		delete(b.allowedUsers, id)
 		removed = append(removed, id)
 	}
-	snapshot := copyIDSet(b.allowedUsers)
 	b.accessMu.Unlock()
 
 	if len(removed) > 0 {
-		if err := b.writeAllowedUsers(snapshot); err != nil {
+		if err := b.saveAllowedUsers(); err != nil {
 			b.log.Error("save allowed users failed", "path", b.cfg.AllowedUsersFile, "error", err)
 		}
 	}
@@ -196,7 +191,7 @@ func (b *Bot) removeAllowedUserIDs(ids []int64) ([]int64, []int64, []int64) {
 func parseTelegramUserIDArgs(args string) ([]int64, error) {
 	args = strings.TrimSpace(args)
 	if args == "" {
-		return nil, errors.New("Укажите Telegram ID: /allow 123456789")
+		return nil, errMissingTelegramID
 	}
 
 	parts := strings.FieldsFunc(args, func(r rune) bool {
@@ -210,11 +205,17 @@ func parseTelegramUserIDArgs(args string) ([]int64, error) {
 			continue
 		}
 		if strings.HasPrefix(part, "@") {
-			return nil, errors.New("По username добавлять ненадежно: username меняется, а бот не всегда может получить по нему user ID. Попросите пользователя отправить /whoami и добавьте числовой Telegram ID.")
+			return nil, userError{
+				ru: "По username добавлять ненадежно: username меняется, а бот не всегда может получить по нему user ID. Попросите пользователя отправить /whoami и добавьте числовой Telegram ID.",
+				en: "Adding by username is unreliable: usernames change and the bot cannot always resolve them to a user ID. Ask the user to send /whoami and add the numeric Telegram ID.",
+			}
 		}
 		id, err := strconv.ParseInt(part, 10, 64)
 		if err != nil || id <= 0 {
-			return nil, fmt.Errorf("Некорректный Telegram ID %q. Нужен числовой ID, например /allow 123456789.", part)
+			return nil, userError{
+				ru: fmt.Sprintf("Некорректный Telegram ID %q. Нужен числовой ID, например /allow 123456789.", part),
+				en: fmt.Sprintf("Invalid Telegram ID %q. Use a numeric ID, for example /allow 123456789.", part),
+			}
 		}
 		if _, ok := seen[id]; ok {
 			continue
@@ -223,54 +224,32 @@ func parseTelegramUserIDArgs(args string) ([]int64, error) {
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		return nil, errors.New("Укажите Telegram ID: /allow 123456789")
+		return nil, errMissingTelegramID
 	}
 	return ids, nil
 }
 
 func (b *Bot) loadAllowedUsers() error {
-	if strings.TrimSpace(b.cfg.AllowedUsersFile) == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(b.cfg.AllowedUsersFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	return b.allowedUsersStore.load(func(raw []byte) error {
+		users, err := unmarshalAllowedUserIDs(raw)
+		if err != nil {
+			return err
 		}
-		return err
-	}
-
-	users, err := unmarshalAllowedUserIDs(raw)
-	if err != nil {
-		return err
-	}
-
-	b.accessMu.Lock()
-	for _, userID := range users {
-		b.allowedUsers[userID] = struct{}{}
-	}
-	b.accessMu.Unlock()
-	return nil
+		b.accessMu.Lock()
+		for _, userID := range users {
+			b.allowedUsers[userID] = struct{}{}
+		}
+		b.accessMu.Unlock()
+		return nil
+	})
 }
 
-func (b *Bot) writeAllowedUsers(users map[int64]struct{}) error {
-	if strings.TrimSpace(b.cfg.AllowedUsersFile) == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(b.cfg.AllowedUsersFile), 0o755); err != nil {
-		return err
-	}
-
-	raw, err := json.MarshalIndent(sortedIDs(users), "", "  ")
-	if err != nil {
-		return err
-	}
-
-	tmpFile := b.cfg.AllowedUsersFile + ".tmp"
-	if err := os.WriteFile(tmpFile, raw, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpFile, b.cfg.AllowedUsersFile)
+func (b *Bot) saveAllowedUsers() error {
+	return b.allowedUsersStore.save(func() any {
+		b.accessMu.RLock()
+		defer b.accessMu.RUnlock()
+		return sortedIDs(b.allowedUsers)
+	})
 }
 
 func unmarshalAllowedUserIDs(raw []byte) ([]int64, error) {
@@ -311,14 +290,6 @@ func normalizeUserIDs(ids []int64) []int64 {
 	return sortedInt64s(result)
 }
 
-func copyIDSet(users map[int64]struct{}) map[int64]struct{} {
-	result := make(map[int64]struct{}, len(users))
-	for userID := range users {
-		result[userID] = struct{}{}
-	}
-	return result
-}
-
 func sortedIDs(users map[int64]struct{}) []int64 {
 	ids := make([]int64, 0, len(users))
 	for userID := range users {
@@ -347,4 +318,9 @@ func formatIDsOrDash(ids []int64) string {
 		return "-"
 	}
 	return formatIDs(ids)
+}
+
+var errMissingTelegramID = userError{
+	ru: "Укажите Telegram ID: /allow 123456789",
+	en: "Specify a numeric Telegram ID, for example /allow 123456789.",
 }

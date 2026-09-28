@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -101,5 +102,51 @@ func TestProviderGetsSnapshotForDate(t *testing.T) {
 	}
 	if snapshot.Rates["USD"].Value != 91.25 {
 		t.Fatalf("USD value = %v, want 91.25", snapshot.Rates["USD"].Value)
+	}
+}
+
+func TestGetForDateCachesPastDatesOnly(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<ValCurs><Valute><CharCode>USD</CharCode><Nominal>1</Nominal><Name>USD</Name><Value>90,5</Value></Valute></ValCurs>`))
+	}))
+	defer server.Close()
+
+	provider := NewProvider(server.URL, t.TempDir()+"/rates.json", time.Hour)
+	past := time.Now().AddDate(0, 0, -3)
+	for range 3 {
+		if _, err := provider.GetForDate(t.Context(), past); err != nil {
+			t.Fatalf("GetForDate(past): %v", err)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("past date fetched %d times, want 1 (cached)", got)
+	}
+
+	future := time.Now().AddDate(0, 0, 1)
+	for range 2 {
+		if _, err := provider.GetForDate(t.Context(), future); err != nil {
+			t.Fatalf("GetForDate(future): %v", err)
+		}
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("requests = %d, want future date fetched every time", got)
+	}
+}
+
+func TestHistoryCacheIsBounded(t *testing.T) {
+	provider := NewProvider("http://unused", t.TempDir()+"/rates.json", time.Hour)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range maxHistoryEntries + 10 {
+		provider.rememberHistory(start.AddDate(0, 0, i).Format("2006-01-02"), Snapshot{})
+	}
+	if len(provider.history) != maxHistoryEntries {
+		t.Fatalf("history size = %d, want %d", len(provider.history), maxHistoryEntries)
+	}
+	if _, ok := provider.history["2026-01-01"]; ok {
+		t.Fatal("oldest entries must be evicted first")
 	}
 }

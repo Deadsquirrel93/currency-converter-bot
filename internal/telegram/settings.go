@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -103,7 +101,7 @@ func (b *Bot) setWithCurrency(ctx context.Context, chatID, userID int64, text st
 
 	codes, err := parseCurrencyList(fields[1:])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(language, err.Error(), "Could not read the currency list. Use /with USD EUR RUB or see /list."))
+		_ = b.sendMessage(ctx, chatID, errorText(err, language))
 		return
 	}
 
@@ -171,7 +169,7 @@ func (b *Bot) setMultiplier(ctx context.Context, chatID, userID int64, text stri
 
 	multiplier, err := parseMultiplier(fields[1])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(language, "Множитель должен быть положительным числом, например 1000, 10.5 или 1.", "The multiplier must be a positive number, such as 1000, 10.5, or 1."))
+		_ = b.sendMessage(ctx, chatID, tr(language, "Множитель должен быть положительным числом не больше миллиарда, например 1000, 10.5 или 1.", "The multiplier must be a positive number up to one billion, such as 1000, 10.5, or 1."))
 		return
 	}
 
@@ -215,7 +213,7 @@ func (b *Bot) setModifier(ctx context.Context, chatID, userID int64, text string
 
 	percent, err := parseModifierPercent(fields[1])
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(language, "Процент должен быть числом, например 1.5, +1,5 или -2.", "The percentage must be a number, such as 1.5, +1.5, or -2."))
+		_ = b.sendMessage(ctx, chatID, tr(language, "Процент должен быть числом больше -100 и не больше 1000, например 1.5, +1,5 или -2.", "The percentage must be a number above -100 and up to 1000, such as 1.5, +1.5, or -2."))
 		return
 	}
 
@@ -281,10 +279,9 @@ func (b *Bot) setSession(userID int64, s session) {
 	s = normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
 	b.mu.Lock()
 	b.sessions[userID] = s
-	snapshot := copySessions(b.sessions)
 	b.mu.Unlock()
 
-	if err := b.writeSessions(snapshot); err != nil {
+	if err := b.saveSessions(); err != nil {
 		b.log.Error("save user settings failed", "path", b.cfg.UserSettingsFile, "error", err)
 	}
 }
@@ -292,13 +289,19 @@ func (b *Bot) setSession(userID int64, s session) {
 func (b *Bot) deleteSession(userID int64) {
 	b.mu.Lock()
 	delete(b.sessions, userID)
-	snapshot := copySessions(b.sessions)
 	b.mu.Unlock()
 
-	if err := b.writeSessions(snapshot); err != nil {
+	if err := b.saveSessions(); err != nil {
 		b.log.Error("delete user settings failed", "path", b.cfg.UserSettingsFile, "error", err)
 	}
 }
+
+// Limits for user settings: beyond them results stop being meaningful and
+// numbers overflow formatting. -100% would turn every amount into zero.
+const (
+	maxMultiplier      = 1e9
+	maxModifierPercent = 1000
+)
 
 func parseModifierPercent(raw string) (float64, error) {
 	raw = strings.TrimSpace(strings.ReplaceAll(raw, ",", "."))
@@ -306,7 +309,7 @@ func parseModifierPercent(raw string) (float64, error) {
 		return 0, errors.New("empty percent")
 	}
 	value, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= -100 || value > maxModifierPercent {
 		return 0, errors.New("invalid percent")
 	}
 	return value, nil
@@ -318,7 +321,7 @@ func parseMultiplier(raw string) (float64, error) {
 		return 0, errors.New("empty multiplier")
 	}
 	value, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 || value > maxMultiplier {
 		return 0, errors.New("invalid multiplier")
 	}
 	return value, nil
@@ -370,7 +373,10 @@ func parseCurrencyList(raw []string) ([]string, error) {
 		}
 		code, ok := resolveCurrencyToken(part)
 		if !ok {
-			return nil, errors.New("Такой валюты нет в списке бота. Посмотрите доступные варианты через /list.")
+			return nil, userError{
+				ru: "Такой валюты нет в списке бота. Посмотрите доступные варианты через /list.",
+				en: "That currency is not supported. See the available currencies with /list.",
+			}
 		}
 		if _, ok := seen[code]; ok {
 			continue
@@ -379,7 +385,10 @@ func parseCurrencyList(raw []string) ([]string, error) {
 		codes = append(codes, code)
 	}
 	if len(codes) == 0 {
-		return nil, errors.New("Укажите хотя бы одну валюту: /with USD EUR RUB.")
+		return nil, userError{
+			ru: "Укажите хотя бы одну валюту: /with USD EUR RUB.",
+			en: "Specify at least one currency: /with USD EUR RUB.",
+		}
 	}
 	return codes, nil
 }
@@ -408,11 +417,6 @@ func defaultSession(defaultFrom, defaultTo string) session {
 		To:         defaultTo,
 		Multiplier: 1,
 	}, defaultFrom, defaultTo)
-}
-
-func hasInputSettings(s session) bool {
-	s = normalizeSession(s, "", "")
-	return s.Multiplier != 1 || s.ModifyFromPercent != 0 || s.ModifyToPercent != 0
 }
 
 func formatYesNo(value bool) string {
@@ -490,48 +494,26 @@ func normalizeCurrencyList(codes []string) []string {
 }
 
 func (b *Bot) loadSessions() error {
-	if strings.TrimSpace(b.cfg.UserSettingsFile) == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(b.cfg.UserSettingsFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	return b.sessionsStore.load(func(raw []byte) error {
+		var sessions map[int64]session
+		if err := json.Unmarshal(raw, &sessions); err != nil {
+			return err
 		}
-		return err
-	}
-
-	var sessions map[int64]session
-	if err := json.Unmarshal(raw, &sessions); err != nil {
-		return err
-	}
-
-	b.mu.Lock()
-	for userID, s := range sessions {
-		b.sessions[userID] = normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
-	}
-	b.mu.Unlock()
-	return nil
+		b.mu.Lock()
+		for userID, s := range sessions {
+			b.sessions[userID] = normalizeSession(s, b.cfg.DefaultFrom, b.cfg.DefaultTo)
+		}
+		b.mu.Unlock()
+		return nil
+	})
 }
 
-func (b *Bot) writeSessions(sessions map[int64]session) error {
-	if strings.TrimSpace(b.cfg.UserSettingsFile) == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(b.cfg.UserSettingsFile), 0o755); err != nil {
-		return err
-	}
-
-	raw, err := json.MarshalIndent(sessions, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	tmpFile := b.cfg.UserSettingsFile + ".tmp"
-	if err := os.WriteFile(tmpFile, raw, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpFile, b.cfg.UserSettingsFile)
+func (b *Bot) saveSessions() error {
+	return b.sessionsStore.save(func() any {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		return copySessions(b.sessions)
+	})
 }
 
 func copySessions(sessions map[int64]session) map[int64]session {

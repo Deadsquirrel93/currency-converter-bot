@@ -14,7 +14,7 @@ func (b *Bot) showRate(ctx context.Context, chatID, userID int64, text string) {
 	s := b.getSession(userID)
 	request, err := parseRateRequest(text, s)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(language, err.Error(), "Unknown currency. See the available currencies with /list."))
+		_ = b.sendMessage(ctx, chatID, errorText(err, language))
 		return
 	}
 
@@ -36,15 +36,24 @@ func (b *Bot) sendRate(ctx context.Context, chatID int64, from, to, language str
 	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, time.Now().In(location))
 	reply, err := rateReplyWithHistoryForLanguage(from, to, snapshot, historicalSnapshots, language)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, err.Error()))
+		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, errorText(err, language)))
 		return
 	}
 	_ = b.sendMessage(ctx, chatID, reply)
 }
 
+// historyTimeout bounds how long collecting 30 days of history may take; past
+// days are cached by the provider, so normally only a few requests are made.
+const historyTimeout = 20 * time.Second
+
 func (b *Bot) subscriptionHistoricalSnapshots(ctx context.Context, current rates.Snapshot, localNow time.Time) []subscriptionHistoricalSnapshot {
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+
 	localDate := startOfLocalDay(localNow)
 	snapshots := make([]subscriptionHistoricalSnapshot, 0, 30)
+	var failed []string
+	var lastErr error
 	for daysAgo := 0; daysAgo < 30; daysAgo++ {
 		date := localDate.AddDate(0, 0, -daysAgo)
 		if daysAgo == 0 {
@@ -54,9 +63,13 @@ func (b *Bot) subscriptionHistoricalSnapshots(ctx context.Context, current rates
 
 		snapshot, err := b.rates.GetForDate(ctx, date)
 		if err != nil {
-			b.log.Warn("historical rates unavailable for subscription", "date", date.Format("2006-01-02"), "error", err)
+			failed = append(failed, date.Format("2006-01-02"))
+			lastErr = err
 		}
 		snapshots = append(snapshots, subscriptionHistoricalSnapshot{Date: date, Snapshot: snapshot, Err: err})
+	}
+	if len(failed) > 0 {
+		b.log.Warn("historical rates unavailable", "days", len(failed), "first", failed[0], "last", failed[len(failed)-1], "error", lastErr)
 	}
 	return snapshots
 }
@@ -75,7 +88,7 @@ func parseRateRequest(text string, s session) (rateRequest, error) {
 	s = normalizeSession(s, "", "")
 	args := commandArgs(text)
 	if unknown := firstUnknownCurrencyCodeToken(args); unknown != "" {
-		return rateRequest{}, fmt.Errorf("Не знаю валюту %s. Посмотрите доступные варианты через /list.", unknown)
+		return rateRequest{}, unknownCurrencyCodeError(unknown)
 	}
 	codes := currencyCodesFromText(args)
 	switch len(codes) {
@@ -227,10 +240,6 @@ func formatSubscriptionRateHistoryForLanguage(from, to string, history subscript
 	return strings.Join(lines, "\n")
 }
 
-func formatRateExtreme(current float64, point *subscriptionRatePoint, to string) string {
-	return formatRateExtremeForLanguage(current, point, to, languageRussian)
-}
-
 func formatRateExtremeForLanguage(current float64, point *subscriptionRatePoint, to, language string) string {
 	if point == nil {
 		return tr(language, "нет данных", "no data")
@@ -242,10 +251,6 @@ func formatRateExtremeForLanguage(current float64, point *subscriptionRatePoint,
 		point.Date.Format("2006-01-02"),
 		formatRateDeltaForLanguage(current, point, to, language),
 	)
-}
-
-func formatRateDelta(current float64, point *subscriptionRatePoint, to string) string {
-	return formatRateDeltaForLanguage(current, point, to, languageRussian)
 }
 
 func formatRateDeltaForLanguage(current float64, point *subscriptionRatePoint, to, language string) string {

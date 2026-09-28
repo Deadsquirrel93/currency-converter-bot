@@ -17,7 +17,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 	language := b.userLanguage(userID)
 	request, err := parseConversionInput(text, s)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(language, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.", "I cannot find an amount. For example: 12,345.67, or several amounts on separate lines."))
+		_ = b.sendMessage(ctx, chatID, amountErrorText(err, language))
 		return
 	}
 
@@ -31,7 +31,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 	settings := conversionSettingsForInput(s, request)
 	reply, err := conversionReplyForLanguage(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot, language)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, err.Error()))
+		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, errorText(err, language)))
 		return
 	}
 
@@ -271,6 +271,10 @@ func parseWithCallbackData(data string) (withCallbackRequest, error) {
 	if err != nil {
 		return withCallbackRequest{}, err
 	}
+	// Callback data comes back from the client and can be forged.
+	if amount < 0 || amount > convert.MaxAmount {
+		return withCallbackRequest{}, errors.New("invalid callback amount")
+	}
 	multiplier, err := parseMultiplier(parts[4])
 	if err != nil {
 		return withCallbackRequest{}, err
@@ -288,11 +292,11 @@ func parseWithCallbackData(data string) (withCallbackRequest, error) {
 		if len(parts) != 8 {
 			return withCallbackRequest{}, errors.New("missing modifiers")
 		}
-		request.ModifyFromPercent, err = parseCallbackFloat(parts[6])
+		request.ModifyFromPercent, err = parseModifierPercent(parts[6])
 		if err != nil {
 			return withCallbackRequest{}, err
 		}
-		request.ModifyToPercent, err = parseCallbackFloat(parts[7])
+		request.ModifyToPercent, err = parseModifierPercent(parts[7])
 		if err != nil {
 			return withCallbackRequest{}, err
 		}
@@ -310,4 +314,25 @@ func parseCallbackFloat(raw string) (float64, error) {
 
 func formatFloatForCallback(value float64) string {
 	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+func amountErrorText(err error, language string) string {
+	var ambiguous *convert.AmbiguousError
+	switch {
+	case errors.As(err, &ambiguous):
+		numbers := strings.Join(ambiguous.Numbers, ", ")
+		if len(ambiguous.Numbers) == 2 {
+			hint := ambiguous.Numbers[0] + " x " + ambiguous.Numbers[1]
+			return fmt.Sprintf(tr(language,
+				"В строке несколько чисел (%s), не понимаю, какое переводить. Оставьте одно число или напишите %s, если нужно перемножить.",
+				"The line has several numbers (%s), so I am not sure which one to convert. Keep one number, or write %s to multiply them."), numbers, hint)
+		}
+		return fmt.Sprintf(tr(language,
+			"В строке несколько чисел (%s), не понимаю, какое переводить. Оставьте одно число в строке.",
+			"The line has several numbers (%s), so I am not sure which one to convert. Keep one number per line."), numbers)
+	case errors.Is(err, convert.ErrTooLarge):
+		return tr(language, "Слишком большая сумма.", "The amount is too large.")
+	default:
+		return tr(language, "Не вижу сумму. Например: 12 345,67 или несколько сумм, каждая с новой строки.", "I cannot find an amount. For example: 12,345.67, or several amounts on separate lines.")
+	}
 }

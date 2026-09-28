@@ -36,37 +36,13 @@ func formatFixedDecimal(value float64, precision int) string {
 	formatted := strconv.FormatFloat(value, 'f', precision, 64)
 	whole, fraction, ok := strings.Cut(formatted, ".")
 	if !ok {
-		return groupDigits(whole)
+		return convert.GroupDigits(whole)
 	}
-	return groupDigits(whole) + "," + fraction
+	return convert.GroupDigits(whole) + "," + fraction
 }
 
 func groupWholeNumber(value float64) string {
-	rounded := math.Round(value)
-	return groupDigits(strconv.FormatInt(int64(rounded), 10))
-}
-
-func groupDigits(raw string) string {
-	sign := ""
-	if strings.HasPrefix(raw, "-") {
-		sign = "-"
-		raw = strings.TrimPrefix(raw, "-")
-	}
-	if len(raw) <= 3 {
-		return sign + raw
-	}
-	var b strings.Builder
-	firstGroup := len(raw) % 3
-	if firstGroup == 0 {
-		firstGroup = 3
-	}
-	b.WriteString(sign)
-	b.WriteString(raw[:firstGroup])
-	for i := firstGroup; i < len(raw); i += 3 {
-		b.WriteByte(' ')
-		b.WriteString(raw[i : i+3])
-	}
-	return b.String()
+	return convert.GroupDigits(strconv.FormatFloat(math.Round(value), 'f', 0, 64))
 }
 
 func formatSmallDecimal(value float64, precision int) string {

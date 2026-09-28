@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,21 @@ type Bot struct {
 	subMu                sync.RWMutex
 	subscriptions        map[int64]dailySubscription
 	subscriptionLocation *time.Location
+
+	sessionsStore      *jsonStore
+	subscriptionsStore *jsonStore
+	allowedUsersStore  *jsonStore
+
+	limiter        *userLimiter
+	blockedNotices *userLimiter
+	subRetry       map[int64]subscriptionRetry
+
+	botID       int64
+	botUsername string
 }
+
+// updateTimeout bounds how long one update may hold the sequential update loop.
+const updateTimeout = 60 * time.Second
 
 func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot {
 	subscriptionLocation, err := loadSubscriptionLocation(cfg.SubscriptionTimezone)
@@ -42,27 +57,36 @@ func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot 
 		allowedUsers:         map[int64]struct{}{},
 		subscriptions:        map[int64]dailySubscription{},
 		subscriptionLocation: subscriptionLocation,
+		sessionsStore:        newJSONStore(cfg.UserSettingsFile),
+		subscriptionsStore:   newJSONStore(cfg.SubscriptionsFile),
+		allowedUsersStore:    newJSONStore(cfg.AllowedUsersFile),
+		limiter:              newUserLimiter(updatesPerMinute, time.Minute),
+		blockedNotices:       newUserLimiter(1, blockedNoticeInterval),
+		subRetry:             map[int64]subscriptionRetry{},
+		botID:                botIDFromToken(cfg.TelegramToken),
 	}
 	if err := b.loadSessions(); err != nil {
-		b.log.Warn("load user settings failed", "error", err)
+		b.log.Error("load user settings failed", "error", err)
 	}
 	if err := b.loadAllowedUsers(); err != nil {
-		b.log.Warn("load allowed users failed", "error", err)
+		b.log.Error("load allowed users failed", "error", err)
 	}
 	if err := b.loadSubscriptions(); err != nil {
-		b.log.Warn("load subscriptions failed", "error", err)
+		b.log.Error("load subscriptions failed", "error", err)
 	}
 	return b
 }
 
 func (b *Bot) Run(ctx context.Context) error {
-	if err := b.setBotCommands(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		b.log.Warn("set bot commands failed", "error", err)
-	}
+	b.startup(ctx)
 
-	go b.runSubscriptionScheduler(ctx)
+	var wg sync.WaitGroup
+	// Let the scheduler finish its current step before Run returns on shutdown.
+	defer wg.Wait()
+	wg.Go(func() { b.runSubscriptionScheduler(ctx) })
 
 	var offset int64
+	failures := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -75,21 +99,75 @@ func (b *Bot) Run(ctx context.Context) error {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
-			b.log.Warn("get updates failed", "error", err)
-			sleep(ctx, 3*time.Second)
+			failures++
+			delay := retryDelay(failures, err)
+			b.log.Warn("get updates failed", "error", err, "retry_in", delay.String())
+			sleep(ctx, delay)
 			continue
 		}
+		failures = 0
 
 		for _, update := range updates {
 			if update.UpdateID >= offset {
 				offset = update.UpdateID + 1
 			}
-			b.handleUpdate(ctx, update)
+			updateCtx, cancel := context.WithTimeout(ctx, updateTimeout)
+			b.handleUpdate(updateCtx, update)
+			cancel()
 		}
 	}
 }
 
+func (b *Bot) startup(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if me, err := b.getMe(ctx); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			b.log.Warn("get bot info failed", "error", err)
+		}
+	} else {
+		b.botUsername = me.Username
+	}
+	if err := b.setBotCommands(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		b.log.Warn("set bot commands failed", "error", err)
+	}
+}
+
+// retryDelay grows 3s, 6s, 12s ... up to a minute, so an outage or a revoked
+// token does not flood the logs, and honors Telegram's retry_after.
+func retryDelay(failures int, err error) time.Duration {
+	delay := 3 * time.Second
+	for i := 1; i < failures && delay < time.Minute; i++ {
+		delay *= 2
+	}
+	delay = min(delay, time.Minute)
+	var apiErr *apiError
+	if errors.As(err, &apiErr) && apiErr.RetryAfter > delay {
+		delay = apiErr.RetryAfter
+	}
+	return delay
+}
+
+// botIDFromToken extracts the bot's user ID, the part of the token before ':'.
+func botIDFromToken(token string) int64 {
+	raw, _, _ := strings.Cut(token, ":")
+	id, _ := strconv.ParseInt(raw, 10, 64)
+	return id
+}
+
 func (b *Bot) handleUpdate(ctx context.Context, update update) {
+	if userID := updateUserID(update); userID != 0 {
+		if allowed, first := b.limiter.allow(userID, time.Now()); !allowed {
+			if first {
+				b.log.Warn("rate limit exceeded", "user_id", userID)
+				if m := update.Message; m != nil && isPrivateChat(m.Chat) && b.isAllowed(userID) {
+					_ = b.sendMessage(ctx, m.Chat.ID, tr(b.userLanguage(userID), "Слишком много запросов. Подождите минуту.", "Too many requests. Please wait a minute."))
+				}
+			}
+			return
+		}
+	}
+
 	if update.InlineQuery != nil {
 		b.handleInlineQuery(ctx, *update.InlineQuery)
 		return
@@ -104,10 +182,19 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
-	text := strings.TrimSpace(update.Message.Text)
+	text, addressed := b.messageText(update.Message)
+	if !addressed {
+		return
+	}
 	if !b.isAllowed(userID) {
-		b.log.Warn("blocked user", "user_id", userID, "chat_id", chatID)
-		b.showBlockedUserMessage(ctx, chatID, userID, text)
+		// In groups stay silent; in private chats answer once per interval.
+		if !isPrivateChat(update.Message.Chat) {
+			return
+		}
+		if ok, _ := b.blockedNotices.allow(userID, time.Now()); ok {
+			b.log.Warn("blocked user", "user_id", userID, "chat_id", chatID)
+			b.showBlockedUserMessage(ctx, chatID, userID, text)
+		}
 		return
 	}
 
@@ -224,7 +311,7 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 	reply, err := conversionReplyForLanguage(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, s.Round, snapshot, language)
 	if err != nil {
 		_ = b.answerCallbackQuery(ctx, query.ID, tr(language, "Не удалось перевести", "Conversion failed"))
-		_ = b.sendMessage(ctx, query.Message.Chat.ID, fmt.Sprintf("%s. %s", err.Error(), tr(language, "Проверьте настройки.", "Check your settings.")))
+		_ = b.sendMessage(ctx, query.Message.Chat.ID, fmt.Sprintf("%s. %s", errorText(err, language), tr(language, "Проверьте настройки.", "Check your settings.")))
 		return
 	}
 
@@ -312,4 +399,51 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+}
+
+func updateUserID(update update) int64 {
+	switch {
+	case update.Message != nil && update.Message.From != nil:
+		return update.Message.From.ID
+	case update.CallbackQuery != nil && update.CallbackQuery.From != nil:
+		return update.CallbackQuery.From.ID
+	case update.InlineQuery != nil && update.InlineQuery.From != nil:
+		return update.InlineQuery.From.ID
+	}
+	return 0
+}
+
+func isPrivateChat(c chat) bool {
+	return c.Type == "" || c.Type == "private"
+}
+
+// messageText returns the text the bot should handle and whether the message
+// is addressed to the bot at all. Private chats are always addressed. In groups
+// the bot reacts only to commands (without @suffix or with its own username),
+// to messages starting with its @username, and to replies to its messages.
+func (b *Bot) messageText(msg *message) (string, bool) {
+	text := strings.TrimSpace(msg.Text)
+	if isPrivateChat(msg.Chat) {
+		return text, true
+	}
+	if text == "" {
+		return "", false
+	}
+	if strings.HasPrefix(text, "/") {
+		command := strings.Fields(text)[0]
+		if _, target, ok := strings.Cut(command, "@"); ok && !strings.EqualFold(target, b.botUsername) {
+			return "", false
+		}
+		return text, true
+	}
+	if b.botUsername != "" {
+		mention := "@" + b.botUsername
+		if len(text) >= len(mention) && strings.EqualFold(text[:len(mention)], mention) {
+			return strings.TrimSpace(text[len(mention):]), true
+		}
+	}
+	if reply := msg.ReplyToMessage; reply != nil && reply.From != nil && b.botID != 0 && reply.From.ID == b.botID {
+		return text, true
+	}
+	return "", false
 }

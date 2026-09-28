@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +29,7 @@ func (b *Bot) setSubscription(ctx context.Context, chatID, userID int64, text st
 	s := b.getSession(userID)
 	subscription, err := parseSubscription(text, s)
 	if err != nil {
-		_ = b.sendMessage(ctx, chatID, tr(language, err.Error(), "Invalid subscription. Use /subscribe 09:00 or /subscribe 09:00 USD RUB."))
+		_ = b.sendMessage(ctx, chatID, errorText(err, language))
 		return
 	}
 	subscription.ChatID = chatID
@@ -86,10 +84,9 @@ func (b *Bot) setUserSubscription(userID int64, subscription dailySubscription) 
 	subscription = normalizeSubscription(subscription)
 	b.subMu.Lock()
 	b.subscriptions[userID] = subscription
-	snapshot := copySubscriptions(b.subscriptions)
 	b.subMu.Unlock()
 
-	if err := b.writeSubscriptions(snapshot); err != nil {
+	if err := b.saveSubscriptions(); err != nil {
 		b.log.Error("save subscriptions failed", "path", b.cfg.SubscriptionsFile, "error", err)
 	}
 }
@@ -101,10 +98,9 @@ func (b *Bot) removeUserSubscription(userID int64) bool {
 		return false
 	}
 	delete(b.subscriptions, userID)
-	snapshot := copySubscriptions(b.subscriptions)
 	b.subMu.Unlock()
 
-	if err := b.writeSubscriptions(snapshot); err != nil {
+	if err := b.saveSubscriptions(); err != nil {
 		b.log.Error("delete subscription failed", "path", b.cfg.SubscriptionsFile, "error", err)
 	}
 	return true
@@ -156,7 +152,7 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 		}
 		text := fmt.Sprintf(tr(language, "Ежедневный курс %s -> %s\n\n%s", "Daily rate %s -> %s\n\n%s"), subscription.From, subscription.To, reply)
 		if err := b.sendMessage(ctx, subscription.ChatID, text); err != nil {
-			b.log.Error("send subscription failed", "user_id", userID, "chat_id", subscription.ChatID, "error", err)
+			b.handleSubscriptionSendError(userID, subscription, localNow, err)
 			continue
 		}
 		b.markSubscriptionSent(userID, subscription, subscriptionDate(localNow))
@@ -172,6 +168,14 @@ func (b *Bot) dueSubscriptions(now time.Time) map[int64]dailySubscription {
 	for userID, subscription := range b.subscriptions {
 		subscription = normalizeSubscription(subscription)
 		if subscription.ChatID == 0 || subscription.Time == "" || subscription.LastSentDate == today {
+			continue
+		}
+		// Access revoked with /disallow: keep the subscription (it resumes if
+		// access is granted again) but stop sending.
+		if !b.isAllowed(userID) {
+			continue
+		}
+		if retry, ok := b.subRetry[userID]; ok && retry.Date == today && now.Before(retry.Next) {
 			continue
 		}
 		if dailyTimePassed(subscription.Time, now) {
@@ -195,10 +199,10 @@ func (b *Bot) markSubscriptionSent(userID int64, sent dailySubscription, date st
 	}
 	current.LastSentDate = date
 	b.subscriptions[userID] = current
-	snapshot := copySubscriptions(b.subscriptions)
+	delete(b.subRetry, userID)
 	b.subMu.Unlock()
 
-	if err := b.writeSubscriptions(snapshot); err != nil {
+	if err := b.saveSubscriptions(); err != nil {
 		b.log.Error("mark subscription sent failed", "path", b.cfg.SubscriptionsFile, "error", err)
 	}
 }
@@ -220,17 +224,23 @@ func parseSubscription(text string, s session) (dailySubscription, error) {
 	args := commandArgs(text)
 	fields := strings.Fields(args)
 	if len(fields) == 0 {
-		return dailySubscription{}, errors.New("Укажите время: /subscribe 09:00 или /subscribe 09:00 USD RUB.")
+		return dailySubscription{}, userError{
+			ru: "Укажите время: /subscribe 09:00 или /subscribe 09:00 USD RUB.",
+			en: "Specify a time: /subscribe 09:00 or /subscribe 09:00 USD RUB.",
+		}
 	}
 
 	dailyTime, err := parseDailyTime(fields[0])
 	if err != nil {
-		return dailySubscription{}, errors.New("Время должно быть в формате HH:MM, например /subscribe 09:00.")
+		return dailySubscription{}, userError{
+			ru: "Время должно быть в формате HH:MM, например /subscribe 09:00.",
+			en: "The time must be in HH:MM format, for example /subscribe 09:00.",
+		}
 	}
 
 	currencyText := strings.Join(fields[1:], " ")
 	if unknown := firstUnknownCurrencyCodeToken(currencyText); unknown != "" {
-		return dailySubscription{}, fmt.Errorf("Не знаю валюту %s. Посмотрите доступные варианты через /list.", unknown)
+		return dailySubscription{}, unknownCurrencyCodeError(unknown)
 	}
 	codes := currencyCodesFromText(currencyText)
 
@@ -277,52 +287,30 @@ func subscriptionDate(now time.Time) string {
 }
 
 func (b *Bot) loadSubscriptions() error {
-	if strings.TrimSpace(b.cfg.SubscriptionsFile) == "" {
+	return b.subscriptionsStore.load(func(raw []byte) error {
+		var subscriptions map[int64]dailySubscription
+		if err := json.Unmarshal(raw, &subscriptions); err != nil {
+			return err
+		}
+		b.subMu.Lock()
+		for userID, subscription := range subscriptions {
+			subscription = normalizeSubscription(subscription)
+			if subscription.ChatID == 0 || subscription.Time == "" {
+				continue
+			}
+			b.subscriptions[userID] = subscription
+		}
+		b.subMu.Unlock()
 		return nil
-	}
-	raw, err := os.ReadFile(b.cfg.SubscriptionsFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-
-	var subscriptions map[int64]dailySubscription
-	if err := json.Unmarshal(raw, &subscriptions); err != nil {
-		return err
-	}
-
-	b.subMu.Lock()
-	for userID, subscription := range subscriptions {
-		subscription = normalizeSubscription(subscription)
-		if subscription.ChatID == 0 || subscription.Time == "" {
-			continue
-		}
-		b.subscriptions[userID] = subscription
-	}
-	b.subMu.Unlock()
-	return nil
+	})
 }
 
-func (b *Bot) writeSubscriptions(subscriptions map[int64]dailySubscription) error {
-	if strings.TrimSpace(b.cfg.SubscriptionsFile) == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(b.cfg.SubscriptionsFile), 0o755); err != nil {
-		return err
-	}
-
-	raw, err := json.MarshalIndent(subscriptions, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	tmpFile := b.cfg.SubscriptionsFile + ".tmp"
-	if err := os.WriteFile(tmpFile, raw, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpFile, b.cfg.SubscriptionsFile)
+func (b *Bot) saveSubscriptions() error {
+	return b.subscriptionsStore.save(func() any {
+		b.subMu.RLock()
+		defer b.subMu.RUnlock()
+		return copySubscriptions(b.subscriptions)
+	})
 }
 
 func copySubscriptions(subscriptions map[int64]dailySubscription) map[int64]dailySubscription {
@@ -342,4 +330,46 @@ func normalizeSubscription(subscription dailySubscription) dailySubscription {
 		subscription.Time = ""
 	}
 	return subscription
+}
+
+// subscriptionRetryDelays is the pause after each consecutive failed delivery
+// on one day; after the last one the subscription is skipped until tomorrow.
+var subscriptionRetryDelays = []time.Duration{5 * time.Minute, 15 * time.Minute, 45 * time.Minute}
+
+type subscriptionRetry struct {
+	Date     string
+	Failures int
+	Next     time.Time
+}
+
+// handleSubscriptionSendError stops retrying every minute: an unreachable chat
+// (bot blocked, removed from the group) drops the subscription, other errors
+// back off and give up for the day.
+func (b *Bot) handleSubscriptionSendError(userID int64, subscription dailySubscription, localNow time.Time, err error) {
+	if isChatUnreachable(err) {
+		b.log.Warn("subscription removed: chat unreachable", "user_id", userID, "chat_id", subscription.ChatID, "error", err)
+		b.removeUserSubscription(userID)
+		return
+	}
+
+	today := subscriptionDate(localNow)
+	b.subMu.Lock()
+	retry := b.subRetry[userID]
+	if retry.Date != today {
+		retry = subscriptionRetry{Date: today}
+	}
+	retry.Failures++
+	giveUp := retry.Failures > len(subscriptionRetryDelays)
+	if !giveUp {
+		retry.Next = localNow.Add(subscriptionRetryDelays[retry.Failures-1])
+		b.subRetry[userID] = retry
+	}
+	b.subMu.Unlock()
+
+	if giveUp {
+		b.log.Error("send subscription failed, skipping until tomorrow", "user_id", userID, "chat_id", subscription.ChatID, "error", err)
+		b.markSubscriptionSent(userID, subscription, today)
+		return
+	}
+	b.log.Warn("send subscription failed, will retry", "user_id", userID, "chat_id", subscription.ChatID, "retry_at", retry.Next.Format(time.RFC3339), "error", err)
 }

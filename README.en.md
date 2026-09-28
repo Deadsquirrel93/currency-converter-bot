@@ -99,6 +99,10 @@ Until a user picks a language in a private chat, inline results use the language
 
 Thousands separators: `1 000 000`, `1.000.000`, and `1,000,000` all mean one million, and `12,345.67` is 12345.67. A single comma is read by interface language: with English, `1,000` is 1000 and `1,5` is 1.5; with Russian, a single comma is always decimal.
 
+If a line contains several separate numbers (`iPhone 15 for 1000`, `2 coffees at 350`), the bot does not glue them together; it asks to keep one number or to multiply them: `2 x 350`. A currency may stand before the multiplication sign: `100 usd x 9`.
+
+Limits: modifier percentages must be above `-100` and at most `1000`, the `/multi` multiplier at most one billion, and amounts at most 10^15.
+
 ## Commands
 
 - `/lang en|ru` — change the interface language
@@ -128,6 +132,20 @@ Supported currencies are the ones listed by `/list`: `RUB` plus popular currenci
 
 Each user has one subscription: a new `/subscribe` replaces it, and messages go to the chat where the command was sent. If the time has already passed today, the bot sends the current rate right away and the next message arrives tomorrow. If the bot was offline at the scheduled time, it sends today's rate after startup.
 
+## Groups
+
+The bot can be added to a group. There it reacts only to commands (`/rate` or `/rate@your_bot`), to messages starting with `@your_bot` (for example `@your_bot 100 usd`), and to replies to its own messages; other chatter is ignored. Users outside the whitelist get no replies in groups.
+
+## Flood and failure protection
+
+- Each user can send up to 30 requests per minute; above that the bot warns once and stays silent until the minute ends.
+- Users outside the whitelist see the access notice at most once every 10 minutes.
+- Past-day rates are cached in memory, so `/rate` and subscriptions do not re-download the same dates from the Bank of Russia, and history collection has a time limit.
+- If a user blocks the bot or the bot is removed from a group, the subscription is deleted. On temporary Telegram errors delivery is retried after 5, 15, and 45 minutes, then postponed until the next day.
+- After `/disallow` the user's subscription stops (and resumes if access is granted again).
+- While Telegram is unreachable the retry pause grows from 3 seconds to a minute; `429 Too Many Requests` is honored.
+- Admin commands `/allow`, `/disallow`, `/allowed` appear in the command menu only for admins (an admin must have messaged the bot at least once).
+
 ## Deployment
 
 Update an existing deployment with:
@@ -137,6 +155,16 @@ Update an existing deployment with:
 ```
 
 The script pulls with `git pull --ff-only`, rebuilds the image, and recreates the Compose services. If settings are not persisted, inspect `docker compose logs bot` and verify that `data` is writable by UID `10001`.
+
+The container runs hardened: read-only root filesystem (only `/app/data` is writable), all capabilities dropped, `no-new-privileges`, memory and process limits. Logs are capped at three 10 MB files, so they cannot fill the disk.
+
+Data files are created with mode `600` and the data directory with `700`, because they contain Telegram user IDs. For an existing directory, fix the permissions from inside the container (the container user owns it):
+
+```bash
+docker compose exec bot sh -c 'chmod 700 /app/data && chmod 600 /app/data/*.json'
+```
+
+If a settings, subscriptions, or whitelist file is corrupted, the bot does not overwrite it with empty data: it renames the file to `*.corrupt-<time>`, logs an error, and keeps running, so the data can be recovered manually.
 
 Multiple compatible XML sources can be configured as a comma-separated fallback list (the legacy `CBR_DAILY_URL` name is also accepted):
 

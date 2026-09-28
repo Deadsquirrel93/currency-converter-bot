@@ -2,15 +2,18 @@ package rates
 
 import (
 	"context"
+	"currency-converter-bot/internal/fsutil"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,7 +36,17 @@ type Provider struct {
 	cacheFile    string
 	cacheTTL     time.Duration
 	fetchRetries int
+
+	historyMu sync.Mutex
+	history   map[string]Snapshot
 }
+
+// moscow is the Bank of Russia's timezone. Russia has no DST, so a fixed
+// offset avoids depending on the tz database here.
+var moscow = time.FixedZone("MSK", 3*60*60)
+
+// maxHistoryEntries bounds the in-memory history cache; /rate needs 30 days.
+const maxHistoryEntries = 60
 
 func NewProvider(sourceURL, cacheFile string, cacheTTL time.Duration) *Provider {
 	return &Provider{
@@ -42,6 +55,7 @@ func NewProvider(sourceURL, cacheFile string, cacheTTL time.Duration) *Provider 
 		cacheFile:    cacheFile,
 		cacheTTL:     cacheTTL,
 		fetchRetries: 3,
+		history:      map[string]Snapshot{},
 	}
 }
 
@@ -63,18 +77,62 @@ func (p *Provider) Get(ctx context.Context) (Snapshot, error) {
 	return Snapshot{}, err
 }
 
+// GetForDate returns the rates the Bank of Russia set for date. Rates for past
+// days never change, so they are kept in memory and fetched only once.
 func (p *Provider) GetForDate(ctx context.Context, date time.Time) (Snapshot, error) {
-	return p.fetchAnyCBRForDate(ctx, date)
+	key := date.Format("2006-01-02")
+	p.historyMu.Lock()
+	cached, ok := p.history[key]
+	p.historyMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+
+	snapshot, err := p.fetchAnyCBRForDate(ctx, date)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if key < time.Now().In(moscow).Format("2006-01-02") {
+		p.rememberHistory(key, snapshot)
+	}
+	return snapshot, nil
+}
+
+func (p *Provider) rememberHistory(key string, snapshot Snapshot) {
+	p.historyMu.Lock()
+	defer p.historyMu.Unlock()
+	p.history[key] = snapshot
+	if len(p.history) <= maxHistoryEntries {
+		return
+	}
+	keys := make([]string, 0, len(p.history))
+	for k := range p.history {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys[:len(keys)-maxHistoryEntries] {
+		delete(p.history, k)
+	}
+}
+
+// UnknownCurrencyError means the snapshot has no rate for Code, for example
+// because the Bank of Russia stopped publishing it.
+type UnknownCurrencyError struct {
+	Code string
+}
+
+func (e *UnknownCurrencyError) Error() string {
+	return "unknown currency " + e.Code
 }
 
 func Convert(amount float64, from, to string, snapshot Snapshot) (float64, error) {
 	fromRate, ok := snapshot.Rates[strings.ToUpper(from)]
 	if !ok {
-		return 0, fmt.Errorf("unknown currency %s", from)
+		return 0, &UnknownCurrencyError{Code: strings.ToUpper(from)}
 	}
 	toRate, ok := snapshot.Rates[strings.ToUpper(to)]
 	if !ok {
-		return 0, fmt.Errorf("unknown currency %s", to)
+		return 0, &UnknownCurrencyError{Code: strings.ToUpper(to)}
 	}
 
 	amountRUB := amount * fromRate.Value / float64(fromRate.Nominal)
@@ -108,14 +166,13 @@ func (p *Provider) readAnyCache() (Snapshot, bool) {
 }
 
 func (p *Provider) writeCache(snapshot Snapshot) error {
-	if err := os.MkdirAll(filepath.Dir(p.cacheFile), 0o755); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p.cacheFile, raw, 0o644)
+	// Written from both the scheduler and message handlers: the atomic write
+	// keeps the fallback cache readable when the Bank of Russia is down.
+	return fsutil.WriteFileAtomic(p.cacheFile, raw, 0o600)
 }
 
 func (p *Provider) fetchAnyCBR(ctx context.Context) (Snapshot, error) {
@@ -231,7 +288,7 @@ func parseSourceURLs(raw string) []string {
 }
 
 func errorsIsContext(err error) bool {
-	return err == context.Canceled || err == context.DeadlineExceeded
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func sleepBeforeRetry(ctx context.Context, attempt int) {

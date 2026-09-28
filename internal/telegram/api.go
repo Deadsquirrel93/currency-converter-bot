@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
+	"time"
 )
 
 func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
@@ -100,21 +104,103 @@ func (b *Bot) answerInlineQuery(ctx context.Context, inlineQueryID string, resul
 	return nil
 }
 
+// setBotCommands shows regular users only the commands they can use; admins
+// get the full list through a per-chat scope (their private chat ID equals
+// their user ID).
 func (b *Bot) setBotCommands(ctx context.Context) error {
 	for _, language := range []string{"", languageRussian, languageEnglish} {
-		var result apiResponse
-		payload := map[string]any{"commands": botCommandsForLanguage(language)}
-		if language != "" {
-			payload["language_code"] = language
-		}
-		if err := b.post(ctx, "setMyCommands", payload, &result); err != nil {
+		if err := b.setMyCommands(ctx, userBotCommands(language), language, nil); err != nil {
 			return err
 		}
-		if !result.OK {
-			return fmt.Errorf("telegram setMyCommands failed: %s", result.Description)
+	}
+	for _, adminID := range sortedIDs(b.cfg.AdminUsers) {
+		scope := map[string]any{"type": "chat", "chat_id": adminID}
+		for _, language := range []string{"", languageRussian, languageEnglish} {
+			if err := b.setMyCommands(ctx, botCommandsForLanguage(language), language, scope); err != nil {
+				// Fails with "chat not found" until the admin has started the bot.
+				b.log.Warn("set admin commands failed", "admin_id", adminID, "error", err)
+				break
+			}
 		}
 	}
 	return nil
+}
+
+func (b *Bot) setMyCommands(ctx context.Context, commands []botCommand, language string, scope map[string]any) error {
+	var result apiResponse
+	payload := map[string]any{"commands": commands}
+	if language != "" {
+		payload["language_code"] = language
+	}
+	if scope != nil {
+		payload["scope"] = scope
+	}
+	if err := b.post(ctx, "setMyCommands", payload, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram setMyCommands failed: %s", result.Description)
+	}
+	return nil
+}
+
+// adminCommands are hidden from the command menu of regular users.
+var adminCommands = map[string]bool{"allow": true, "disallow": true, "allowed": true}
+
+func userBotCommands(language string) []botCommand {
+	all := botCommandsForLanguage(language)
+	commands := make([]botCommand, 0, len(all))
+	for _, command := range all {
+		if !adminCommands[command.Command] {
+			commands = append(commands, command)
+		}
+	}
+	return commands
+}
+
+func (b *Bot) getMe(ctx context.Context) (user, error) {
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      user   `json:"result"`
+	}
+	if err := b.post(ctx, "getMe", map[string]any{}, &result); err != nil {
+		return user{}, err
+	}
+	if !result.OK {
+		return user{}, fmt.Errorf("telegram getMe failed: %s", result.Description)
+	}
+	return result.Result, nil
+}
+
+// maxRetryAfter caps how long a single call waits after a 429 before its one
+// retry; longer flood-control pauses are returned to the caller as errors.
+const maxRetryAfter = 30 * time.Second
+
+// apiError is a Bot API call rejected by Telegram. Description comes from
+// Telegram and does not contain the token.
+type apiError struct {
+	Method      string
+	StatusCode  int
+	Description string
+	RetryAfter  time.Duration
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("telegram %s failed: %d %s", e.Method, e.StatusCode, e.Description)
+}
+
+// isChatUnreachable reports errors that will not go away by retrying: the user
+// blocked the bot, the bot was removed from the group, or the chat is gone.
+func isChatUnreachable(err error) bool {
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode == http.StatusForbidden {
+		return true
+	}
+	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Description), "chat not found")
 }
 
 func (b *Bot) post(ctx context.Context, method string, payload any, target any) (err error) {
@@ -125,6 +211,19 @@ func (b *Bot) post(ctx context.Context, method string, payload any, target any) 
 	if err != nil {
 		return err
 	}
+	err = b.postOnce(ctx, method, raw, target)
+	var apiErr *apiError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests && apiErr.RetryAfter > 0 && apiErr.RetryAfter <= maxRetryAfter {
+		sleep(ctx, apiErr.RetryAfter)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err = b.postOnce(ctx, method, raw, target)
+	}
+	return err
+}
+
+func (b *Bot) postOnce(ctx context.Context, method string, raw []byte, target any) error {
 	endpoint := fmt.Sprintf("%s/bot%s/%s", b.cfg.TelegramAPI, b.cfg.TelegramToken, method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
@@ -139,7 +238,24 @@ func (b *Bot) post(ctx context.Context, method string, payload any, target any) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram %s failed: %s", method, resp.Status)
+		var failure struct {
+			Description string `json:"description"`
+			Parameters  struct {
+				RetryAfter int `json:"retry_after"`
+			} `json:"parameters"`
+		}
+		// Reading the (small) body also lets the connection be reused.
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&failure)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		if failure.Description == "" {
+			failure.Description = http.StatusText(resp.StatusCode)
+		}
+		return &apiError{
+			Method:      method,
+			StatusCode:  resp.StatusCode,
+			Description: failure.Description,
+			RetryAfter:  time.Duration(failure.Parameters.RetryAfter) * time.Second,
+		}
 	}
 	return json.NewDecoder(resp.Body).Decode(target)
 }
@@ -240,19 +356,22 @@ type update struct {
 }
 
 type message struct {
-	MessageID int64  `json:"message_id"`
-	From      *user  `json:"from"`
-	Chat      chat   `json:"chat"`
-	Text      string `json:"text"`
+	MessageID      int64    `json:"message_id"`
+	From           *user    `json:"from"`
+	Chat           chat     `json:"chat"`
+	Text           string   `json:"text"`
+	ReplyToMessage *message `json:"reply_to_message"`
 }
 
 type user struct {
 	ID           int64  `json:"id"`
+	Username     string `json:"username"`
 	LanguageCode string `json:"language_code"`
 }
 
 type chat struct {
-	ID int64 `json:"id"`
+	ID   int64  `json:"id"`
+	Type string `json:"type"`
 }
 
 type callbackQuery struct {

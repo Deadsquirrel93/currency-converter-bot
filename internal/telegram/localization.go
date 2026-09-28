@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	"currency-converter-bot/internal/rates"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -99,4 +101,31 @@ func ratesUnavailableText(language string) string {
 
 func checkCurrenciesText(language, message string) string {
 	return fmt.Sprintf("%s. %s", message, tr(language, "Проверьте валюты.", "Check the currencies."))
+}
+
+// userError is an input error with a message for each interface language.
+type userError struct {
+	ru, en string
+}
+
+func (e userError) Error() string { return e.en }
+
+// errorText returns the message to show for err in language.
+func errorText(err error, language string) string {
+	var localized userError
+	if errors.As(err, &localized) {
+		return tr(language, localized.ru, localized.en)
+	}
+	var unknown *rates.UnknownCurrencyError
+	if errors.As(err, &unknown) {
+		return fmt.Sprintf(tr(language, "Нет курса ЦБ РФ для %s", "No Bank of Russia rate for %s"), unknown.Code)
+	}
+	return err.Error()
+}
+
+func unknownCurrencyCodeError(code string) error {
+	return userError{
+		ru: fmt.Sprintf("Не знаю валюту %s. Посмотрите доступные варианты через /list.", code),
+		en: fmt.Sprintf("Unknown currency %s. See the available currencies with /list.", code),
+	}
 }
