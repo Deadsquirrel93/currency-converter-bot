@@ -37,7 +37,7 @@ func (b *Bot) sendRate(ctx context.Context, chatID int64, from, to, language str
 		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, errorText(err, language)))
 		return
 	}
-	_ = b.sendMessage(ctx, chatID, reply)
+	_ = b.sendMessageWithMarkup(ctx, chatID, reply, chartButtonMarkup(from, to, language))
 }
 
 // historyTimeout bounds how long collecting 30 days of history may take; past

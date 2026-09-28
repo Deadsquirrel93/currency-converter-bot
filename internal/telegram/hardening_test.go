@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,9 @@ import (
 type apiCall struct {
 	Method  string
 	Payload map[string]any
+	// ContentType and File are set for multipart uploads such as sendPhoto.
+	ContentType string
+	File        []byte
 }
 
 // fakeTelegram records calls; reply decides the HTTP status and body per call.
@@ -34,8 +38,24 @@ func newFakeTelegram(t *testing.T, reply func(call apiCall, n int) (int, string)
 	t.Helper()
 	fake := &fakeTelegram{reply: reply}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := apiCall{Method: r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]}
-		_ = json.NewDecoder(r.Body).Decode(&call.Payload)
+		call := apiCall{Method: r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:], ContentType: r.Header.Get("Content-Type")}
+		if strings.HasPrefix(call.ContentType, "multipart/form-data") {
+			if err := r.ParseMultipartForm(10 << 20); err == nil {
+				call.Payload = map[string]any{}
+				for key, values := range r.MultipartForm.Value {
+					call.Payload[key] = values[0]
+				}
+				if files := r.MultipartForm.File["photo"]; len(files) == 1 {
+					if f, err := files[0].Open(); err == nil {
+						call.File, _ = io.ReadAll(f)
+						f.Close()
+						call.Payload["photo_content_type"] = files[0].Header.Get("Content-Type")
+					}
+				}
+			}
+		} else {
+			_ = json.NewDecoder(r.Body).Decode(&call.Payload)
+		}
 		fake.mu.Lock()
 		fake.calls = append(fake.calls, call)
 		n := len(fake.calls)

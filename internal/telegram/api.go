@@ -7,7 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,6 +66,40 @@ func (b *Bot) sendMessageWithMarkupAndParseMode(ctx context.Context, chatID int6
 	}
 	if !result.OK {
 		return fmt.Errorf("telegram sendMessage failed: %s", result.Description)
+	}
+	return nil
+}
+
+func (b *Bot) sendPhoto(ctx context.Context, chatID int64, photo []byte, caption string, markup *inlineKeyboardMarkup) error {
+	fields := map[string]string{
+		"chat_id": strconv.FormatInt(chatID, 10),
+		"caption": caption,
+	}
+	if markup != nil {
+		raw, err := json.Marshal(markup)
+		if err != nil {
+			return err
+		}
+		fields["reply_markup"] = string(raw)
+	}
+	var result apiResponse
+	if err := b.postMultipart(ctx, "sendPhoto", fields, "photo", "chart.png", "image/png", photo, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram sendPhoto failed: %s", result.Description)
+	}
+	return nil
+}
+
+// sendChatAction shows "sending photo..." while a slow reply is prepared.
+func (b *Bot) sendChatAction(ctx context.Context, chatID int64, action string) error {
+	var result apiResponse
+	if err := b.post(ctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": action}, &result); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram sendChatAction failed: %s", result.Description)
 	}
 	return nil
 }
@@ -203,33 +241,71 @@ func isChatUnreachable(err error) bool {
 	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Description), "chat not found")
 }
 
-func (b *Bot) post(ctx context.Context, method string, payload any, target any) (err error) {
-	// The token is part of the URL, and net/http errors quote the URL verbatim.
-	defer func() { err = redactSecret(err, b.cfg.TelegramToken) }()
-
+func (b *Bot) post(ctx context.Context, method string, payload any, target any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	err = b.postOnce(ctx, method, raw, target)
+	return b.postRaw(ctx, method, raw, "application/json", target)
+}
+
+// postMultipart sends fields and one file as multipart/form-data, the only
+// way to upload a file. Nested objects such as reply_markup go in fields as
+// JSON strings.
+func (b *Bot) postMultipart(ctx context.Context, method string, fields map[string]string, fileField, fileName, fileType string, file []byte, target any) error {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := writer.WriteField(key, fields[key]); err != nil {
+			return err
+		}
+	}
+	header := textproto.MIMEHeader{}
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, fileField, fileName))
+	header.Set("Content-Type", fileType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(file); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return b.postRaw(ctx, method, body.Bytes(), writer.FormDataContentType(), target)
+}
+
+// postRaw sends one Bot API request, retrying once after a short 429. Every
+// request goes through here, so the token never leaks through an error.
+func (b *Bot) postRaw(ctx context.Context, method string, raw []byte, contentType string, target any) (err error) {
+	// The token is part of the URL, and net/http errors quote the URL verbatim.
+	defer func() { err = redactSecret(err, b.cfg.TelegramToken) }()
+
+	err = b.postOnce(ctx, method, raw, contentType, target)
 	var apiErr *apiError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests && apiErr.RetryAfter > 0 && apiErr.RetryAfter <= maxRetryAfter {
 		sleep(ctx, apiErr.RetryAfter)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		err = b.postOnce(ctx, method, raw, target)
+		err = b.postOnce(ctx, method, raw, contentType, target)
 	}
 	return err
 }
 
-func (b *Bot) postOnce(ctx context.Context, method string, raw []byte, target any) error {
+func (b *Bot) postOnce(ctx context.Context, method string, raw []byte, contentType string, target any) error {
 	endpoint := fmt.Sprintf("%s/bot%s/%s", b.cfg.TelegramAPI, b.cfg.TelegramToken, method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := b.client.Do(req)
 	if err != nil {
@@ -285,6 +361,7 @@ func botCommandsForLanguage(language string) []botCommand {
 			{Command: "tz", Description: "time zone"},
 			{Command: "alert", Description: "rate alert"},
 			{Command: "alerts", Description: "my alerts"},
+			{Command: "chart", Description: "30-day chart"},
 			{Command: "with", Description: "conversion buttons"},
 			{Command: "with_modify", Description: "button modifiers"},
 			{Command: "inline_modify", Description: "explicit-currency modifiers"},
@@ -316,6 +393,7 @@ func botCommandsForLanguage(language string) []botCommand {
 		{Command: "tz", Description: "часовой пояс"},
 		{Command: "alert", Description: "алерт по курсу"},
 		{Command: "alerts", Description: "мои алерты"},
+		{Command: "chart", Description: "график за 30 дней"},
 		{Command: "with", Description: "кнопки перевода в валюты"},
 		{Command: "with_modify", Description: "модификаторы для кнопок"},
 		{Command: "inline_modify", Description: "модификаторы для явных валют"},
