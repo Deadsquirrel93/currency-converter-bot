@@ -116,7 +116,7 @@ func TestNewRateIsAnnouncedOncePerDate(t *testing.T) {
 		if minute == 25 {
 			cbr.publish("29.09.2026", "81,5000")
 		}
-		bot.sendNewRates(t.Context(), now)
+		bot.watchRates(t.Context(), now)
 	}
 
 	texts := sentTexts(fake)
@@ -146,7 +146,7 @@ func TestNewRateNotAnnouncedOnceInForce(t *testing.T) {
 	bot.setNewRateSubscriptionState(1, newRateSubscription{ChatID: 100, From: "USD", To: "RUB", LastRateDate: "2026-09-26"})
 
 	// A restart after midnight: the rates dated today are no longer news.
-	bot.sendNewRates(t.Context(), msk(29, 0, 30))
+	bot.watchRates(t.Context(), msk(29, 0, 30))
 	if got := len(sentTexts(fake)); got != 0 {
 		t.Fatalf("sent %d messages for rates already in force, want 0", got)
 	}
@@ -160,7 +160,7 @@ func TestNewRateWithoutSubscribersDoesNotPollCBR(t *testing.T) {
 	_, url := newFakeTelegram(t, nil)
 	bot := newNewRateBot(t, cbrURL, url, "", config.Config{})
 	for minute := 0; minute < 120; minute++ {
-		bot.sendNewRates(t.Context(), msk(28, 15, 0).Add(time.Duration(minute)*time.Minute))
+		bot.watchRates(t.Context(), msk(28, 15, 0).Add(time.Duration(minute)*time.Minute))
 	}
 	if got := cbr.calls(); got != 0 {
 		t.Fatalf("CBR requested %d times without subscribers, want 0", got)
@@ -173,7 +173,7 @@ func TestNewRateSubscriptionWithoutKnownDateIsInitializedSilently(t *testing.T) 
 	bot := newNewRateBot(t, cbrURL, url, "", config.Config{})
 	bot.setNewRateSubscriptionState(1, newRateSubscription{ChatID: 100, From: "USD", To: "RUB"})
 
-	bot.sendNewRates(t.Context(), msk(28, 16, 0))
+	bot.watchRates(t.Context(), msk(28, 16, 0))
 	if got := len(sentTexts(fake)); got != 0 {
 		t.Fatalf("sent %d messages, want 0", got)
 	}
@@ -191,8 +191,8 @@ func TestNewRateDeliveryErrors(t *testing.T) {
 		bot := newNewRateBot(t, cbrURL, url, "", config.Config{})
 		bot.setNewRateSubscriptionState(1, newRateSubscription{ChatID: 100, From: "USD", To: "RUB", LastRateDate: "2026-09-26"})
 
-		bot.sendNewRates(t.Context(), msk(28, 16, 0))
-		bot.sendNewRates(t.Context(), msk(28, 16, 1))
+		bot.watchRates(t.Context(), msk(28, 16, 0))
+		bot.watchRates(t.Context(), msk(28, 16, 1))
 		if _, ok := bot.getNewRateSubscription(1); ok {
 			t.Fatal("subscription to a chat that blocked the bot must be removed")
 		}
@@ -210,7 +210,7 @@ func TestNewRateDeliveryErrors(t *testing.T) {
 		bot.setNewRateSubscriptionState(1, newRateSubscription{ChatID: 100, From: "USD", To: "RUB", LastRateDate: "2026-09-26"})
 
 		for minute := 0; minute < 3*60; minute++ {
-			bot.sendNewRates(t.Context(), msk(28, 16, 0).Add(time.Duration(minute)*time.Minute))
+			bot.watchRates(t.Context(), msk(28, 16, 0).Add(time.Duration(minute)*time.Minute))
 		}
 		// First try + retries after 5, 15 and 45 minutes.
 		if got := len(fake.methodCalls("sendMessage")); got != 4 {
@@ -228,7 +228,7 @@ func TestNewRateSkipsDisallowedUsers(t *testing.T) {
 	bot := newNewRateBot(t, cbrURL, url, "", config.Config{AdminUsers: map[int64]struct{}{1: {}}})
 	bot.setNewRateSubscriptionState(2, newRateSubscription{ChatID: 200, From: "USD", To: "RUB", LastRateDate: "2026-09-26"})
 
-	bot.sendNewRates(t.Context(), msk(28, 16, 0))
+	bot.watchRates(t.Context(), msk(28, 16, 0))
 	if got := len(sentTexts(fake)); got != 0 {
 		t.Fatalf("sent %d messages to a user without access, want 0", got)
 	}
@@ -236,7 +236,7 @@ func TestNewRateSkipsDisallowedUsers(t *testing.T) {
 		t.Fatal("subscription must be kept while access is revoked")
 	}
 	bot.addAllowedUserIDs([]int64{2})
-	bot.sendNewRates(t.Context(), msk(28, 16, 1))
+	bot.watchRates(t.Context(), msk(28, 16, 1))
 	if got := len(sentTexts(fake)); got != 1 {
 		t.Fatalf("sent %d messages after access was granted, want 1", got)
 	}
@@ -291,7 +291,7 @@ func TestNewRateSubscriptionCommands(t *testing.T) {
 		t.Fatalf("group subscription = %+v, want chat -100 and tomorrow marked as sent", sub)
 	}
 	// The scheduler must not repeat it.
-	bot.sendNewRates(t.Context(), time.Now())
+	bot.watchRates(t.Context(), time.Now())
 	if got := len(sentTexts(fake)); got != before+2 {
 		t.Fatalf("scheduler sent %d more messages, want 0", got-before-2)
 	}

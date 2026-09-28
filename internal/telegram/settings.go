@@ -267,7 +267,8 @@ func (b *Bot) deleteSettings(ctx context.Context, chatID, userID int64) {
 	b.deleteSession(userID)
 	b.removeUserSubscription(userID)
 	b.removeNewRateSubscription(userID)
-	_ = b.sendMessage(ctx, chatID, tr(language, "Ваши данные удалены: настройки, выбор языка и подписки. При следующем сообщении нужно будет снова выбрать язык.", "Your data has been deleted: settings, language choice, and subscriptions. You will need to choose a language again with your next message."))
+	b.removeAllAlerts(userID)
+	_ = b.sendMessage(ctx, chatID, tr(language, "Ваши данные удалены: настройки, выбор языка, подписки и алерты. При следующем сообщении нужно будет снова выбрать язык.", "Your data has been deleted: settings, language choice, subscriptions, and alerts. You will need to choose a language again with your next message."))
 }
 
 func (b *Bot) getSession(userID int64) session {

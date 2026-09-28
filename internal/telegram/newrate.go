@@ -90,16 +90,24 @@ func (b *Bot) latestRates(ctx context.Context, now time.Time) (rates.Snapshot, b
 	return latest, latest.Date != ""
 }
 
-// sendNewRates announces rates that are set but not yet in force to every
-// subscriber who has not had them. It runs every minute from the scheduler.
-func (b *Bot) sendNewRates(ctx context.Context, now time.Time) {
-	if b.rates == nil || !b.hasNewRateSubscriptions() {
+// watchRates runs every minute from the scheduler: it asks the Bank of
+// Russia for new rates on the nextRateCheck schedule, and only while someone
+// is waiting for them, then serves the new rate subscriptions and alerts.
+func (b *Bot) watchRates(ctx context.Context, now time.Time) {
+	if b.rates == nil || (!b.hasNewRateSubscriptions() && !b.hasAlerts()) {
 		return
 	}
 	latest, ok := b.latestRates(ctx, now)
 	if !ok {
 		return
 	}
+	b.sendNewRates(ctx, now, latest)
+	b.sendAlerts(ctx, now, latest)
+}
+
+// sendNewRates announces rates that are set but not yet in force to every
+// subscriber who has not had them.
+func (b *Bot) sendNewRates(ctx context.Context, now time.Time, latest rates.Snapshot) {
 	due := b.dueNewRates(latest.Date, now)
 	// Once the rates are in force they are no longer news: a restart after
 	// midnight must not announce yesterday's publication.

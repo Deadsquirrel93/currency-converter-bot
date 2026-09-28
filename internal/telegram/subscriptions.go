@@ -142,7 +142,7 @@ func (b *Bot) removeUserSubscription(userID int64) bool {
 
 func (b *Bot) runSubscriptionScheduler(ctx context.Context) {
 	b.sendDueSubscriptions(ctx, time.Now())
-	b.sendNewRates(ctx, time.Now())
+	b.watchRates(ctx, time.Now())
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -152,7 +152,7 @@ func (b *Bot) runSubscriptionScheduler(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			b.sendDueSubscriptions(ctx, now)
-			b.sendNewRates(ctx, now)
+			b.watchRates(ctx, now)
 		}
 	}
 }

@@ -21,6 +21,7 @@ type Config struct {
 	AllowedUsersFile     string
 	SubscriptionsFile    string
 	NewRateSubsFile      string
+	AlertsFile           string
 	SubscriptionTimezone string
 	CacheTTL             time.Duration
 	CBRDailyURL          string
@@ -41,6 +42,7 @@ func Load(path string) (Config, error) {
 		AllowedUsersFile:     valueOrDefault(os.Getenv("ALLOWED_USERS_FILE"), "data/allowed_users.json"),
 		SubscriptionsFile:    valueOrDefault(os.Getenv("SUBSCRIPTIONS_FILE"), "data/subscriptions.json"),
 		NewRateSubsFile:      valueOrDefault(os.Getenv("NEW_RATE_SUBSCRIPTIONS_FILE"), "data/new_rate_subscriptions.json"),
+		AlertsFile:           valueOrDefault(os.Getenv("ALERTS_FILE"), "data/alerts.json"),
 		SubscriptionTimezone: valueOrDefault(os.Getenv("SUBSCRIPTION_TIMEZONE"), "Asia/Tashkent"),
 		CBRDailyURL:          valueOrDefault(os.Getenv("CBR_DAILY_URLS"), valueOrDefault(os.Getenv("CBR_DAILY_URL"), "https://www.cbr.ru/scripts/XML_daily.asp")),
 		TelegramAPI:          strings.TrimRight(valueOrDefault(os.Getenv("TELEGRAM_API_BASE"), "https://api.telegram.org"), "/"),
