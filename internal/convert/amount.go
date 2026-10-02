@@ -36,11 +36,7 @@ type Options struct {
 	CommaThousands bool
 }
 
-func ParseAmount(input string) (float64, error) {
-	return ParseAmountWith(input, Options{})
-}
-
-func ParseAmountWith(input string, opts Options) (float64, error) {
+func ParseAmount(input string, opts Options) (float64, error) {
 	value, err := parseExpression(input, opts)
 	if !errors.Is(err, errNotExpression) {
 		return value, err
@@ -232,10 +228,10 @@ func parseMultiplication(input string, opts Options) (float64, bool) {
 // before a spaced multiplication sign, as in "100 usd x 9" or "100$ x 9".
 // A word glued to the sign ("box") is not skipped, so "100 box 2" stays plain.
 func skipWordBefore(runes []rune, i int) int {
-	if i < 0 || !(unicode.IsLetter(runes[i]) || isCurrencySymbol(runes[i])) {
+	if i < 0 || !(unicode.IsLetter(runes[i]) || IsCurrencySymbol(runes[i])) {
 		return i
 	}
-	for i >= 0 && (unicode.IsLetter(runes[i]) || isCurrencySymbol(runes[i])) {
+	for i >= 0 && (unicode.IsLetter(runes[i]) || IsCurrencySymbol(runes[i])) {
 		i--
 	}
 	for i >= 0 && unicode.IsSpace(runes[i]) {
@@ -244,7 +240,8 @@ func skipWordBefore(runes []rune, i int) int {
 	return i
 }
 
-func isCurrencySymbol(r rune) bool {
+// IsCurrencySymbol reports the currency signs the bot understands.
+func IsCurrencySymbol(r rune) bool {
 	switch r {
 	case '$', '€', '₽', '£', '¥':
 		return true
@@ -296,11 +293,7 @@ func isAmountRune(r rune) bool {
 	return unicode.IsDigit(r) || r == '.' || r == ',' || unicode.IsSpace(r)
 }
 
-func ParseAmounts(input string) (float64, int, error) {
-	return ParseAmountsWith(input, Options{})
-}
-
-func ParseAmountsWith(input string, opts Options) (float64, int, error) {
+func ParseAmounts(input string, opts Options) (float64, int, error) {
 	var total float64
 	count := 0
 
@@ -310,7 +303,7 @@ func ParseAmountsWith(input string, opts Options) (float64, int, error) {
 			continue
 		}
 
-		amount, err := ParseAmountWith(line, opts)
+		amount, err := ParseAmount(line, opts)
 		if err != nil {
 			if errors.Is(err, ErrNoAmount) || errors.Is(err, errNotNumber) {
 				continue
@@ -344,6 +337,19 @@ func FormatMoney(value float64) string {
 		sign = ""
 	}
 	return sign + GroupDigits(whole) + "," + fraction
+}
+
+// FormatFixed formats value with exactly decimals digits after the comma and
+// space-grouped thousands: "12 345,67". Zero decimals round half away from zero.
+func FormatFixed(value float64, decimals int) string {
+	if decimals <= 0 {
+		value, decimals = math.Round(value), 0
+	}
+	whole, fraction, ok := strings.Cut(strconv.FormatFloat(value, 'f', decimals, 64), ".")
+	if !ok {
+		return GroupDigits(whole)
+	}
+	return GroupDigits(whole) + "," + fraction
 }
 
 // GroupDigits inserts a space between groups of three digits: "1234567" ->

@@ -32,12 +32,12 @@ func (b *Bot) sendRate(ctx context.Context, chatID int64, from, to, language str
 	}
 
 	historicalSnapshots := b.subscriptionHistoricalSnapshots(ctx, snapshot, time.Now().In(location))
-	reply, err := rateReplyWithHistoryForLanguage(from, to, snapshot, historicalSnapshots, language)
+	reply, err := rateReplyWithHistory(from, to, snapshot, historicalSnapshots, language)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, errorText(err, language)))
 		return
 	}
-	_ = b.sendMessageWithMarkup(ctx, chatID, reply, chartButtonMarkup(from, to, language))
+	_ = b.sendMessageWithMarkup(ctx, chatID, reply, chartButtonMarkup(from, to, language), "")
 }
 
 // historyTimeout bounds how long collecting 30 days of history may take; past
@@ -112,11 +112,7 @@ func parseRateRequest(text string, s session) (rateRequest, error) {
 	}
 }
 
-func rateReply(from, to string, snapshot rates.Snapshot) (string, error) {
-	return rateReplyForLanguage(from, to, snapshot, languageRussian)
-}
-
-func rateReplyForLanguage(from, to string, snapshot rates.Snapshot, language string) (string, error) {
+func rateReply(from, to string, snapshot rates.Snapshot, language string) (string, error) {
 	direct, err := rates.Convert(1, from, to, snapshot)
 	if err != nil {
 		return "", err
@@ -152,19 +148,13 @@ func rateReplyForLanguage(from, to string, snapshot rates.Snapshot, language str
 	), nil
 }
 
-type rateHistoricalSnapshot = subscriptionHistoricalSnapshot
-
-func rateReplyWithHistory(from, to string, snapshot rates.Snapshot, historicalSnapshots []rateHistoricalSnapshot) (string, error) {
-	return rateReplyWithHistoryForLanguage(from, to, snapshot, historicalSnapshots, languageRussian)
-}
-
-func rateReplyWithHistoryForLanguage(from, to string, snapshot rates.Snapshot, historicalSnapshots []rateHistoricalSnapshot, language string) (string, error) {
-	reply, err := rateReplyForLanguage(from, to, snapshot, language)
+func rateReplyWithHistory(from, to string, snapshot rates.Snapshot, historicalSnapshots []subscriptionHistoricalSnapshot, language string) (string, error) {
+	reply, err := rateReply(from, to, snapshot, language)
 	if err != nil {
 		return "", err
 	}
 	history := subscriptionRateHistoryFromSnapshots(from, to, historicalSnapshots)
-	return reply + "\n\n" + formatSubscriptionRateHistoryForLanguage(from, to, history, language), nil
+	return reply + "\n\n" + formatSubscriptionRateHistory(from, to, history, language), nil
 }
 
 type subscriptionRateHistory struct {
@@ -235,11 +225,7 @@ func subscriptionRatePointFromSnapshot(from, to string, snapshot *subscriptionHi
 	return &subscriptionRatePoint{Date: snapshot.Date, Rate: rate}
 }
 
-func formatSubscriptionRateHistory(from, to string, history subscriptionRateHistory) string {
-	return formatSubscriptionRateHistoryForLanguage(from, to, history, languageRussian)
-}
-
-func formatSubscriptionRateHistoryForLanguage(from, to string, history subscriptionRateHistory, language string) string {
+func formatSubscriptionRateHistory(from, to string, history subscriptionRateHistory, language string) string {
 	lines := []string{
 		fmt.Sprintf(tr(language, "Динамика %s -> %s:", "%s -> %s trend:"), from, to),
 		fmt.Sprintf(tr(language, "Со вчера: %s", "Since yesterday: %s"), formatRateDeltaForLanguage(history.CurrentRate, history.Yesterday, to, language)),

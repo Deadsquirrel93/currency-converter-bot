@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -24,37 +25,6 @@ type session struct {
 	ModifyToPercent   float64  `json:"modify_to_percent"`
 	// Timezone is an IANA name or "UTC+03:00"; empty means SUBSCRIPTION_TIMEZONE.
 	Timezone string `json:"timezone,omitempty"`
-}
-
-func (s *session) UnmarshalJSON(raw []byte) error {
-	type sessionAlias session
-	var aux struct {
-		sessionAlias
-		With json.RawMessage `json:"with"`
-	}
-	if err := json.Unmarshal(raw, &aux); err != nil {
-		return err
-	}
-
-	*s = session(aux.sessionAlias)
-	if len(aux.With) == 0 || string(aux.With) == "null" {
-		return nil
-	}
-
-	var list []string
-	if err := json.Unmarshal(aux.With, &list); err == nil {
-		s.With = list
-		return nil
-	}
-
-	var single string
-	if err := json.Unmarshal(aux.With, &single); err != nil {
-		return err
-	}
-	if strings.TrimSpace(single) != "" {
-		s.With = []string{single}
-	}
-	return nil
 }
 
 func (b *Bot) setCurrency(ctx context.Context, chatID, userID int64, text string, isFrom bool) {
@@ -242,7 +212,7 @@ func (b *Bot) showSettings(ctx context.Context, chatID, userID int64) {
 		snapshot = rates.Snapshot{}
 	}
 	language := b.userLanguage(userID)
-	_ = b.sendMessage(ctx, chatID, settingsTextForLanguage(s, snapshot, language, b.timezoneLabel(userID, language)))
+	_ = b.sendMessage(ctx, chatID, settingsText(s, snapshot, language, b.timezoneLabel(userID, language)))
 }
 
 func (b *Bot) resetSettings(ctx context.Context, chatID, userID int64) {
@@ -344,19 +314,10 @@ func parseRoundMode(raw string) (string, error) {
 	}
 }
 
+// roundPrecision reads a mode checked by parseRoundMode; "" means auto.
 func roundPrecision(roundMode string) (int, bool) {
-	switch roundMode {
-	case "0":
-		return 0, true
-	case "2":
-		return 2, true
-	case "4":
-		return 4, true
-	case "6":
-		return 6, true
-	default:
-		return 0, false
-	}
+	precision, err := strconv.Atoi(roundMode)
+	return precision, err == nil
 }
 
 func parseYesNo(raw string) (bool, error) {
@@ -440,11 +401,7 @@ func formatRoundMode(roundMode string) string {
 	return roundMode
 }
 
-func settingsText(s session, snapshot rates.Snapshot) string {
-	return settingsTextForLanguage(s, snapshot, languageRussian, s.Timezone)
-}
-
-func settingsTextForLanguage(s session, snapshot rates.Snapshot, language, timezone string) string {
+func settingsText(s session, snapshot rates.Snapshot, language, timezone string) string {
 	s = normalizeSession(s, "", "")
 	updatedAt := tr(language, "нет данных", "no data")
 	if !snapshot.FetchedAt.IsZero() {
@@ -527,14 +484,6 @@ func (b *Bot) saveSessions() error {
 	return b.sessionsStore.save(func() any {
 		b.mu.RLock()
 		defer b.mu.RUnlock()
-		return copySessions(b.sessions)
+		return maps.Clone(b.sessions)
 	})
-}
-
-func copySessions(sessions map[int64]session) map[int64]session {
-	result := make(map[int64]session, len(sessions))
-	for userID, s := range sessions {
-		result[userID] = s
-	}
-	return result
 }

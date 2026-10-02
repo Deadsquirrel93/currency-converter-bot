@@ -59,7 +59,7 @@ func languageKeyboard() *inlineKeyboardMarkup {
 }
 
 func (b *Bot) showLanguageSelector(ctx context.Context, chatID int64) {
-	_ = b.sendMessageWithMarkup(ctx, chatID, "Выберите язык / Choose your language:", languageKeyboard())
+	_ = b.sendMessageWithMarkup(ctx, chatID, "Выберите язык / Choose your language:", languageKeyboard(), "")
 }
 
 func (b *Bot) setLanguage(ctx context.Context, chatID, userID int64, text string) {

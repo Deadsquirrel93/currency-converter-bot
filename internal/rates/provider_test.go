@@ -59,14 +59,11 @@ func TestProviderFallsBackToNextSourceURL(t *testing.T) {
 	defer ok.Close()
 
 	provider := NewProvider(failed.URL+","+ok.URL, t.TempDir()+"/rates.json", time.Hour)
-	provider.fetchRetries = 1
+	setFetchRetries(t, 1)
 
 	snapshot, err := provider.Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
-	}
-	if snapshot.Source != ok.URL {
-		t.Fatalf("Source = %q, want %q", snapshot.Source, ok.URL)
 	}
 	if snapshot.Rates["USD"].Value != 90.1234 {
 		t.Fatalf("USD value = %v, want 90.1234", snapshot.Rates["USD"].Value)
@@ -91,7 +88,7 @@ func TestProviderGetsSnapshotForDate(t *testing.T) {
 	defer server.Close()
 
 	provider := NewProvider(server.URL+"?existing=1", t.TempDir()+"/rates.json", time.Hour)
-	provider.fetchRetries = 1
+	setFetchRetries(t, 1)
 
 	snapshot, err := provider.GetForDate(context.Background(), time.Date(2026, 5, 10, 14, 0, 0, 0, time.UTC))
 	if err != nil {
@@ -166,7 +163,7 @@ func TestFetchLatestReadsRateDateAndBypassesCache(t *testing.T) {
 	defer server.Close()
 
 	provider := NewProvider(server.URL, t.TempDir()+"/rates.json", time.Hour)
-	provider.fetchRetries = 1
+	setFetchRetries(t, 1)
 
 	first, err := provider.Get(context.Background())
 	if err != nil || first.Date != "2026-09-28" {
@@ -187,5 +184,34 @@ func TestParseCBRDate(t *testing.T) {
 		if got := parseCBRDate(raw); got != want {
 			t.Fatalf("parseCBRDate(%q) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+// setFetchRetries lowers the retries for one test so failing sources do not
+// sleep between attempts.
+func setFetchRetries(t *testing.T, n int) {
+	t.Helper()
+	previous := fetchRetries
+	fetchRetries = n
+	t.Cleanup(func() { fetchRetries = previous })
+}
+
+func TestParseCBRDecimal(t *testing.T) {
+	for raw, want := range map[string]float64{"90,1234": 90.1234, " 1,5\n": 1.5, "100": 100} {
+		if got, err := parseCBRDecimal(raw); err != nil || got != want {
+			t.Fatalf("parseCBRDecimal(%q) = %v, %v, want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"", "90,12abc", "1,2,3", "abc"} {
+		if _, err := parseCBRDecimal(raw); err == nil {
+			t.Fatalf("parseCBRDecimal(%q) error = nil, want an error", raw)
+		}
+	}
+}
+
+func TestParseSourceURLs(t *testing.T) {
+	got := parseSourceURLs(" https://a , ,https://b ")
+	if len(got) != 2 || got[0] != "https://a" || got[1] != "https://b" {
+		t.Fatalf("parseSourceURLs() = %q", got)
 	}
 }

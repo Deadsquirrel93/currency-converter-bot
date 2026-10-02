@@ -41,12 +41,12 @@ func TestParseAmountExpressions(t *testing.T) {
 		{"100 usd x 9 + 1", false, 901},
 	}
 	for _, tt := range tests {
-		got, err := ParseAmountWith(tt.input, Options{CommaThousands: tt.commaThousands})
+		got, err := ParseAmount(tt.input, Options{CommaThousands: tt.commaThousands})
 		if err != nil {
-			t.Fatalf("ParseAmountWith(%q, %v): %v", tt.input, tt.commaThousands, err)
+			t.Fatalf("ParseAmount(%q, %v): %v", tt.input, tt.commaThousands, err)
 		}
 		if math.Abs(got-tt.want) > 1e-9 {
-			t.Fatalf("ParseAmountWith(%q, %v) = %v, want %v", tt.input, tt.commaThousands, got, tt.want)
+			t.Fatalf("ParseAmount(%q, %v) = %v, want %v", tt.input, tt.commaThousands, got, tt.want)
 		}
 	}
 }
@@ -64,7 +64,7 @@ func TestParseAmountNonExpressionsKeepOldBehavior(t *testing.T) {
 		"100 x":     100,
 		"100 (usd)": 100,
 	} {
-		got, err := ParseAmount(input)
+		got, err := ParseAmount(input, Options{})
 		if err != nil {
 			t.Fatalf("ParseAmount(%q): %v", input, err)
 		}
@@ -89,7 +89,7 @@ func TestParseAmountDatesAndPhonesAreNotSubtraction(t *testing.T) {
 		"2024-05-12 + 1",
 		"10:30",
 	} {
-		_, err := ParseAmount(input)
+		_, err := ParseAmount(input, Options{})
 		var ambiguous *AmbiguousError
 		if !errors.As(err, &ambiguous) {
 			t.Fatalf("ParseAmount(%q) error = %v, want AmbiguousError", input, err)
@@ -102,7 +102,7 @@ func TestParseAmountSeveralExpressionsAreAmbiguous(t *testing.T) {
 		"100+50 usd за 2 дня",
 		"2 кофе по 350 + 1",
 	} {
-		_, err := ParseAmount(input)
+		_, err := ParseAmount(input, Options{})
 		var ambiguous *AmbiguousError
 		if !errors.As(err, &ambiguous) {
 			t.Fatalf("ParseAmount(%q) error = %v, want AmbiguousError", input, err)
@@ -128,29 +128,29 @@ func TestParseAmountExpressionErrors(t *testing.T) {
 		{long, ErrExpressionTooComplex},
 	}
 	for _, tt := range tests {
-		if _, err := ParseAmount(tt.input); !errors.Is(err, tt.want) {
+		if _, err := ParseAmount(tt.input, Options{}); !errors.Is(err, tt.want) {
 			t.Fatalf("ParseAmount(%q) error = %v, want %v", tt.input, err, tt.want)
 		}
 	}
 
-	if got, err := ParseAmount(notTooDeep); err != nil || got != 2 {
+	if got, err := ParseAmount(notTooDeep, Options{}); err != nil || got != 2 {
 		t.Fatalf("ParseAmount(%q) = %v, %v, want 2", notTooDeep, got, err)
 	}
 	// A long line of text around a short expression is fine.
-	if got, err := ParseAmount(strings.Repeat("слово ", 100) + "2+2"); err != nil || got != 4 {
+	if got, err := ParseAmount(strings.Repeat("слово ", 100)+"2+2", Options{}); err != nil || got != 4 {
 		t.Fatalf("ParseAmount(long text + 2+2) = %v, %v, want 4", got, err)
 	}
 }
 
 func TestParseAmountsSumsExpressionLines(t *testing.T) {
-	total, count, err := ParseAmounts("100+50\n70 х 5 литров молока\n(12*3)+5\n200")
+	total, count, err := ParseAmounts("100+50\n70 х 5 литров молока\n(12*3)+5\n200", Options{})
 	if err != nil {
 		t.Fatalf("ParseAmounts() error = %v", err)
 	}
 	if total != 741 || count != 4 {
 		t.Fatalf("ParseAmounts() = %v, %d, want 741, 4", total, count)
 	}
-	if _, _, err := ParseAmounts("100\n1/0"); !errors.Is(err, ErrDivisionByZero) {
+	if _, _, err := ParseAmounts("100\n1/0", Options{}); !errors.Is(err, ErrDivisionByZero) {
 		t.Fatalf("ParseAmounts() error = %v, want ErrDivisionByZero", err)
 	}
 }
@@ -160,9 +160,9 @@ func FuzzParseAmount(f *testing.F) {
 		f.Add(seed, false)
 	}
 	f.Fuzz(func(t *testing.T, input string, commaThousands bool) {
-		value, err := ParseAmountWith(input, Options{CommaThousands: commaThousands})
+		value, err := ParseAmount(input, Options{CommaThousands: commaThousands})
 		if err == nil && (value < 0 || value > MaxAmount || math.IsNaN(value)) {
-			t.Fatalf("ParseAmountWith(%q) = %v, want a value in [0, MaxAmount]", input, value)
+			t.Fatalf("ParseAmount(%q) = %v, want a value in [0, MaxAmount]", input, value)
 		}
 	})
 }

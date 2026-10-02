@@ -99,7 +99,7 @@ func newHardeningBot(t *testing.T, cfg config.Config, telegramURL string) *Bot {
 	cfg.TelegramToken = "42:" + testToken
 	cfg.TelegramAPI = telegramURL
 	cfg.DefaultFrom, cfg.DefaultTo = "USD", "RUB"
-	cfg.SubscriptionTimezone = "Asia/Tashkent"
+	cfg.Location = mustLocation(t, "Asia/Tashkent")
 	provider := rates.NewProvider(newCBRServer(t), t.TempDir()+"/rates.json", time.Hour)
 	return New(cfg, provider, slog.New(slog.DiscardHandler))
 }
@@ -153,7 +153,7 @@ func TestSubscriptionBacksOffOnTransientErrors(t *testing.T) {
 }
 
 func TestDisallowedUserDoesNotReceiveSubscription(t *testing.T) {
-	bot := New(config.Config{AdminUsers: map[int64]struct{}{1: {}}, SubscriptionTimezone: "UTC"}, nil, slog.New(slog.DiscardHandler))
+	bot := New(config.Config{AdminUsers: map[int64]struct{}{1: {}}, Location: time.UTC}, nil, slog.New(slog.DiscardHandler))
 	bot.addAllowedUserIDs([]int64{2})
 	bot.subscriptions = map[int64]dailySubscription{2: {ChatID: 2, From: "USD", To: "RUB", Time: "09:00"}}
 	now := time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC)
@@ -437,5 +437,53 @@ func TestCommandRoutingEndToEnd(t *testing.T) {
 		if text := fmt.Sprint(calls[len(calls)-1].Payload["text"]); !strings.Contains(text, step.want) {
 			t.Fatalf("%d %q: reply = %q, want it to contain %q", step.userID, step.text, text, step.want)
 		}
+	}
+}
+
+func TestPostDecodesResultAndRejectsNotOK(t *testing.T) {
+	_, url := newFakeTelegram(t, func(call apiCall, n int) (int, string) {
+		switch call.Method {
+		case "getMe":
+			return http.StatusOK, `{"ok":true,"result":{"id":42,"username":"rates_bot"}}`
+		case "getUpdates":
+			return http.StatusOK, `{"ok":true}`
+		default:
+			return http.StatusOK, `{"ok":false,"description":"something odd"}`
+		}
+	})
+	bot := newHardeningBot(t, config.Config{}, url)
+
+	me, err := bot.getMe(t.Context())
+	if err != nil || me.ID != 42 || me.Username != "rates_bot" {
+		t.Fatalf("getMe() = %+v, %v", me, err)
+	}
+	if updates, err := bot.getUpdates(t.Context(), 0); err != nil || len(updates) != 0 {
+		t.Fatalf("getUpdates() without result = %v, %v, want none", updates, err)
+	}
+	err = bot.sendMessage(t.Context(), 1, "hi")
+	if err == nil || !strings.Contains(err.Error(), "telegram sendMessage failed: something odd") {
+		t.Fatalf("sendMessage() error = %v, want the ok:false description", err)
+	}
+}
+
+func TestSendMessageWithMarkupSendsParseModeAndButtons(t *testing.T) {
+	fake, url := newFakeTelegram(t, func(call apiCall, n int) (int, string) { return http.StatusOK, `{"ok":true}` })
+	bot := newHardeningBot(t, config.Config{}, url)
+
+	if err := bot.sendMessageWithMarkup(t.Context(), 1, "<b>x</b>", chartButtonMarkup("USD", "RUB", languageEnglish), "HTML"); err != nil {
+		t.Fatalf("sendMessageWithMarkup: %v", err)
+	}
+	if err := bot.sendMessage(t.Context(), 1, "plain"); err != nil {
+		t.Fatalf("sendMessage: %v", err)
+	}
+	calls := fake.methodCalls("sendMessage")
+	if len(calls) != 2 || calls[0].Payload["parse_mode"] != "HTML" || calls[0].Payload["reply_markup"] == nil {
+		t.Fatalf("first call = %+v, want HTML with buttons", calls)
+	}
+	if _, ok := calls[1].Payload["parse_mode"]; ok {
+		t.Fatalf("plain message must not set parse_mode: %+v", calls[1].Payload)
+	}
+	if _, ok := calls[1].Payload["reply_markup"]; ok {
+		t.Fatalf("plain message must not set reply_markup: %+v", calls[1].Payload)
 	}
 }

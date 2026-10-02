@@ -155,10 +155,10 @@ func formatUTCOffset(offset int) string {
 
 // defaultLocation is SUBSCRIPTION_TIMEZONE, used for users without /tz.
 func (b *Bot) defaultLocation() *time.Location {
-	if b.subscriptionLocation == nil {
+	if b.cfg.Location == nil {
 		return time.Local
 	}
-	return b.subscriptionLocation
+	return b.cfg.Location
 }
 
 func (b *Bot) userLocation(userID int64) *time.Location {

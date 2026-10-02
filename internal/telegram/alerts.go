@@ -108,7 +108,7 @@ func parseAlert(args string, s session) (rateAlert, error) {
 			en: "An alert needs two different currencies, for example /alert USD RUB > 95.",
 		}
 	}
-	threshold, err := convert.ParseAmountWith(rest, convert.Options{CommaThousands: normalizeLanguage(s.Language) == languageEnglish})
+	threshold, err := convert.ParseAmount(rest, convert.Options{CommaThousands: normalizeLanguage(s.Language) == languageEnglish})
 	// The amount parser reads "-5" as 5, so a minus is rejected here.
 	if err != nil || strings.ContainsAny(rest, "-−") || threshold <= 0 || math.IsNaN(threshold) || math.IsInf(threshold, 0) {
 		return rateAlert{}, userError{
@@ -219,7 +219,7 @@ func (b *Bot) showAlerts(ctx context.Context, chatID, userID int64) {
 		}})
 	}
 	lines = append(lines, tr(language, "Удалить: /alert off N или кнопкой ниже.", "Remove: /alert off N or with a button below."))
-	_ = b.sendMessageWithMarkup(ctx, chatID, strings.Join(lines, "\n"), &inlineKeyboardMarkup{InlineKeyboard: buttons})
+	_ = b.sendMessageWithMarkup(ctx, chatID, strings.Join(lines, "\n"), &inlineKeyboardMarkup{InlineKeyboard: buttons}, "")
 }
 
 func (b *Bot) handleAlertOffCallback(ctx context.Context, query callbackQuery, rawID string) {
@@ -289,10 +289,8 @@ func (b *Bot) handleAlertSendError(userID int64, alert rateAlert, now time.Time,
 	key := alertKey{userID, alert.ID}
 	b.alertsMu.Lock()
 	retry := b.alertRetry[key]
-	retry.Failures++
-	giveUp := retry.Failures > len(subscriptionRetryDelays)
+	giveUp := retry.fail(now)
 	if !giveUp {
-		retry.Next = now.Add(subscriptionRetryDelays[retry.Failures-1])
 		b.alertRetry[key] = retry
 	}
 	b.alertsMu.Unlock()

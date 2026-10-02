@@ -26,23 +26,7 @@ func formatConvertedAmountForMode(value float64, roundMode string) string {
 	if !ok {
 		return formatConvertedAmount(value)
 	}
-	return formatFixedDecimal(value, precision)
-}
-
-func formatFixedDecimal(value float64, precision int) string {
-	if precision <= 0 {
-		return groupWholeNumber(value)
-	}
-	formatted := strconv.FormatFloat(value, 'f', precision, 64)
-	whole, fraction, ok := strings.Cut(formatted, ".")
-	if !ok {
-		return convert.GroupDigits(whole)
-	}
-	return convert.GroupDigits(whole) + "," + fraction
-}
-
-func groupWholeNumber(value float64) string {
-	return convert.GroupDigits(strconv.FormatFloat(math.Round(value), 'f', 0, 64))
+	return convert.FormatFixed(value, precision)
 }
 
 func formatSmallDecimal(value float64, precision int) string {

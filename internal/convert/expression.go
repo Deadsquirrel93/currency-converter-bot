@@ -87,7 +87,7 @@ func tokenizeExpression(runes []rune) []exprToken {
 		r := runes[i]
 		start := i
 		switch {
-		case unicode.IsSpace(r) || isCurrencySymbol(r):
+		case unicode.IsSpace(r) || IsCurrencySymbol(r):
 			// "100$ + 50$": currency symbols do not break an expression.
 			i++
 			continue

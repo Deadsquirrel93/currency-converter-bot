@@ -66,7 +66,7 @@ func newNewRateBot(t *testing.T, cbrURL, telegramURL, subsFile string, cfg confi
 	cfg.TelegramToken = "42:" + testToken
 	cfg.TelegramAPI = telegramURL
 	cfg.DefaultFrom, cfg.DefaultTo = "USD", "RUB"
-	cfg.SubscriptionTimezone = "Asia/Tashkent"
+	cfg.Location = mustLocation(t, "Asia/Tashkent")
 	cfg.NewRateSubsFile = subsFile
 	provider := rates.NewProvider(cbrURL, t.TempDir()+"/rates.json", time.Hour)
 	return New(cfg, provider, slog.New(slog.DiscardHandler))
@@ -326,7 +326,7 @@ func TestRateReplyShowsRateDate(t *testing.T) {
 		"RUB": {Code: "RUB", Nominal: 1, Value: 1},
 		"USD": {Code: "USD", Nominal: 1, Value: 81.5},
 	}}
-	reply, err := rateReplyForLanguage("USD", "RUB", snapshot, languageRussian)
+	reply, err := rateReply("USD", "RUB", snapshot, languageRussian)
 	if err != nil || !strings.HasPrefix(reply, "Курс ЦБ на 29.09.2026:\n1 USD = 81,50 RUB") {
 		t.Fatalf("reply = %q, %v", reply, err)
 	}

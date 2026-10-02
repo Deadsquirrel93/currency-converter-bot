@@ -5,13 +5,13 @@ import (
 	"currency-converter-bot/internal/fsutil"
 	"encoding/json"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,16 +31,14 @@ type Snapshot struct {
 	// dated tomorrow.
 	Date      string          `json:"date,omitempty"`
 	FetchedAt time.Time       `json:"fetched_at"`
-	Source    string          `json:"source"`
 	Rates     map[string]Rate `json:"rates"`
 }
 
 type Provider struct {
-	client       *http.Client
-	sourceURLs   []string
-	cacheFile    string
-	cacheTTL     time.Duration
-	fetchRetries int
+	client     *http.Client
+	sourceURLs []string
+	cacheFile  string
+	cacheTTL   time.Duration
 
 	historyMu sync.Mutex
 	history   map[string]Snapshot
@@ -50,17 +48,19 @@ type Provider struct {
 // offset avoids depending on the tz database here.
 var moscow = time.FixedZone("MSK", 3*60*60)
 
+// fetchRetries is how many times each source is asked before the next one.
+var fetchRetries = 3
+
 // maxHistoryEntries bounds the in-memory history cache; /rate needs 30 days.
 const maxHistoryEntries = 60
 
 func NewProvider(sourceURL, cacheFile string, cacheTTL time.Duration) *Provider {
 	return &Provider{
-		client:       &http.Client{Timeout: 15 * time.Second},
-		sourceURLs:   parseSourceURLs(sourceURL),
-		cacheFile:    cacheFile,
-		cacheTTL:     cacheTTL,
-		fetchRetries: 3,
-		history:      map[string]Snapshot{},
+		client:     &http.Client{Timeout: 15 * time.Second},
+		sourceURLs: parseSourceURLs(sourceURL),
+		cacheFile:  cacheFile,
+		cacheTTL:   cacheTTL,
+		history:    map[string]Snapshot{},
 	}
 }
 
@@ -69,7 +69,7 @@ func (p *Provider) Get(ctx context.Context) (Snapshot, error) {
 		return cached, nil
 	}
 
-	snapshot, err := p.fetchAnyCBR(ctx)
+	snapshot, err := p.fetchAnyCBR(ctx, time.Time{})
 	if err == nil {
 		_ = p.writeCache(snapshot)
 		return snapshot, nil
@@ -86,7 +86,7 @@ func (p *Provider) Get(ctx context.Context) (Snapshot, error) {
 // bypassing the cache TTL, and refreshes the cache with them. It is used to
 // notice the next day's rates as soon as they are published.
 func (p *Provider) FetchLatest(ctx context.Context) (Snapshot, error) {
-	snapshot, err := p.fetchAnyCBR(ctx)
+	snapshot, err := p.fetchAnyCBR(ctx, time.Time{})
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -105,7 +105,7 @@ func (p *Provider) GetForDate(ctx context.Context, date time.Time) (Snapshot, er
 		return cached, nil
 	}
 
-	snapshot, err := p.fetchAnyCBRForDate(ctx, date)
+	snapshot, err := p.fetchAnyCBR(ctx, date)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -192,39 +192,25 @@ func (p *Provider) writeCache(snapshot Snapshot) error {
 	return fsutil.WriteFileAtomic(p.cacheFile, raw, 0o600)
 }
 
-func (p *Provider) fetchAnyCBR(ctx context.Context) (Snapshot, error) {
+// fetchAnyCBR asks each source in turn, with retries, for the latest rates or,
+// when date is set, for the rates of that day.
+func (p *Provider) fetchAnyCBR(ctx context.Context, date time.Time) (Snapshot, error) {
 	var failures []string
 	for _, sourceURL := range p.sourceURLs {
-		for attempt := 1; attempt <= p.fetchRetries; attempt++ {
+		if !date.IsZero() {
+			var err error
+			if sourceURL, err = cbrURLForDate(sourceURL, date); err != nil {
+				failures = append(failures, err.Error())
+				continue
+			}
+		}
+		for attempt := 1; attempt <= fetchRetries; attempt++ {
 			snapshot, err := p.fetchCBR(ctx, sourceURL)
 			if err == nil {
 				return snapshot, nil
 			}
 			failures = append(failures, fmt.Sprintf("%s attempt %d: %v", sourceURL, attempt, err))
-			if errorsIsContext(ctx.Err()) {
-				return Snapshot{}, ctx.Err()
-			}
-			sleepBeforeRetry(ctx, attempt)
-		}
-	}
-	return Snapshot{}, fmt.Errorf("all CBR sources failed: %s", strings.Join(failures, "; "))
-}
-
-func (p *Provider) fetchAnyCBRForDate(ctx context.Context, date time.Time) (Snapshot, error) {
-	var failures []string
-	for _, sourceURL := range p.sourceURLs {
-		datedURL, err := cbrURLForDate(sourceURL, date)
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", sourceURL, err))
-			continue
-		}
-		for attempt := 1; attempt <= p.fetchRetries; attempt++ {
-			snapshot, err := p.fetchCBR(ctx, datedURL)
-			if err == nil {
-				return snapshot, nil
-			}
-			failures = append(failures, fmt.Sprintf("%s attempt %d: %v", datedURL, attempt, err))
-			if errorsIsContext(ctx.Err()) {
+			if ctx.Err() != nil {
 				return Snapshot{}, ctx.Err()
 			}
 			sleepBeforeRetry(ctx, attempt)
@@ -286,7 +272,6 @@ func (p *Provider) fetchCBR(ctx context.Context, sourceURL string) (Snapshot, er
 	return Snapshot{
 		Date:      parseCBRDate(parsed.Date),
 		FetchedAt: time.Now().UTC(),
-		Source:    sourceURL,
 		Rates:     rates,
 	}, nil
 }
@@ -308,14 +293,7 @@ func parseSourceURLs(raw string) []string {
 			result = append(result, part)
 		}
 	}
-	if len(result) == 0 {
-		return []string{"https://www.cbr.ru/scripts/XML_daily.asp"}
-	}
 	return result
-}
-
-func errorsIsContext(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func sleepBeforeRetry(ctx context.Context, attempt int) {
@@ -343,9 +321,7 @@ type cbrValute struct {
 }
 
 func parseCBRDecimal(value string) (float64, error) {
-	var result float64
-	_, err := fmt.Sscan(strings.ReplaceAll(value, ",", "."), &result)
-	return result, err
+	return strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(value), ",", "."), 64)
 }
 
 func charsetReader(charset string, input io.Reader) (io.Reader, error) {

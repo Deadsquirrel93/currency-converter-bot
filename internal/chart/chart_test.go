@@ -105,23 +105,6 @@ func TestNiceAxis(t *testing.T) {
 	}
 }
 
-func TestFormatValue(t *testing.T) {
-	for want, args := range map[string]struct {
-		value    float64
-		decimals int
-	}{
-		"84,41":    {84.4075, 2},
-		"12 500":   {12500, 0},
-		"1 234,5":  {1234.5, 1},
-		"0,0118":   {0.0118, 4},
-		"-1 000,0": {-1000, 1},
-	} {
-		if got := formatValue(args.value, args.decimals); got != want {
-			t.Fatalf("formatValue(%v, %d) = %q, want %q", args.value, args.decimals, got, want)
-		}
-	}
-}
-
 func TestFontCoversChartText(t *testing.T) {
 	for _, r := range "0123456789.,-+/:%() ABCDEFGHIJKLMNOPQRSTUVWXYZ" {
 		if _, ok := glyphs[r]; !ok {

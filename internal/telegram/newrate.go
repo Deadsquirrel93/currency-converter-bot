@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -221,10 +222,8 @@ func (b *Bot) handleNewRateSendError(userID int64, subscription newRateSubscript
 	if retry.Date != rateDate {
 		retry = subscriptionRetry{Date: rateDate}
 	}
-	retry.Failures++
-	giveUp := retry.Failures > len(subscriptionRetryDelays)
+	giveUp := retry.fail(now)
 	if !giveUp {
-		retry.Next = now.Add(subscriptionRetryDelays[retry.Failures-1])
 		b.newRateRetry[userID] = retry
 	}
 	b.newRateMu.Unlock()
@@ -366,11 +365,7 @@ func (b *Bot) saveNewRateSubscriptionsLogged() {
 	err := b.newRateStore.save(func() any {
 		b.newRateMu.Lock()
 		defer b.newRateMu.Unlock()
-		result := make(map[int64]newRateSubscription, len(b.newRateSubs))
-		for userID, subscription := range b.newRateSubs {
-			result[userID] = subscription
-		}
-		return result
+		return maps.Clone(b.newRateSubs)
 	})
 	if err != nil {
 		b.log.Error("save new rate subscriptions failed", "path", b.cfg.NewRateSubsFile, "error", err)

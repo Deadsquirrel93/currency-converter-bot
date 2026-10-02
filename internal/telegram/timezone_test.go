@@ -198,7 +198,7 @@ func TestRateHistoryUsesUsersDays(t *testing.T) {
 	}))
 	t.Cleanup(cbr.Close)
 	fake, url := newFakeTelegram(t, nil)
-	cfg := config.Config{TelegramToken: "42:" + testToken, TelegramAPI: url, DefaultFrom: "USD", DefaultTo: "RUB", SubscriptionTimezone: "UTC"}
+	cfg := config.Config{TelegramToken: "42:" + testToken, TelegramAPI: url, DefaultFrom: "USD", DefaultTo: "RUB", Location: time.UTC}
 	bot := New(cfg, rates.NewProvider(cbr.URL, t.TempDir()+"/rates.json", time.Hour), slog.New(slog.DiscardHandler))
 	bot.saveLanguage(1, languageRussian)
 	s := bot.getSession(1)
@@ -295,11 +295,20 @@ func TestUnknownStoredTimezoneFallsBackToDefault(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"1":{"language":"ru","from":"USD","to":"RUB","timezone":"Mars/Olympus"},"2":{"language":"ru","from":"USD","to":"RUB","timezone":"UTC+03:00"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bot := New(config.Config{UserSettingsFile: path, SubscriptionTimezone: "Asia/Tashkent"}, nil, slog.New(slog.DiscardHandler))
+	bot := New(config.Config{UserSettingsFile: path, Location: mustLocation(t, "Asia/Tashkent")}, nil, slog.New(slog.DiscardHandler))
 	if got := bot.userLocation(1).String(); got != "Asia/Tashkent" {
 		t.Fatalf("unknown stored zone: location = %q, want the default", got)
 	}
 	if got := bot.userLocation(2).String(); got != "UTC+03:00" {
 		t.Fatalf("stored offset: location = %q, want UTC+03:00", got)
 	}
+}
+
+func mustLocation(t *testing.T, name string) *time.Location {
+	t.Helper()
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		t.Fatalf("LoadLocation(%q): %v", name, err)
+	}
+	return location
 }

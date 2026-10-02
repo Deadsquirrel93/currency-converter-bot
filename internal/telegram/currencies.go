@@ -3,6 +3,8 @@ package telegram
 import (
 	"strings"
 	"unicode"
+
+	"currency-converter-bot/internal/convert"
 )
 
 type currencyInfo struct {
@@ -207,7 +209,7 @@ func currencyTokens(text string) []string {
 
 	for _, r := range text {
 		switch {
-		case isCurrencySymbol(r):
+		case convert.IsCurrencySymbol(r):
 			flush()
 			tokens = append(tokens, string(r))
 		case unicode.IsLetter(r) || r == '\'' || r == '’':
@@ -249,19 +251,6 @@ func normalizeCurrencyToken(raw string) string {
 	return token
 }
 
-func isCurrencySymbol(r rune) bool {
-	switch r {
-	case '$', '€', '₽', '£', '¥':
-		return true
-	default:
-		return false
-	}
-}
-
-func supportedCurrenciesText() string {
-	return supportedCurrenciesTextForLanguage(languageRussian)
-}
-
 var englishCurrencyNames = map[string][2]string{
 	"RUB": {"Russian ruble", "Russia"}, "USD": {"US dollar", "United States"},
 	"EUR": {"euro", "Eurozone"}, "GBP": {"pound sterling", "United Kingdom"},
@@ -287,7 +276,7 @@ var englishCurrencyNames = map[string][2]string{
 	"ZAR": {"South African rand", "South Africa"},
 }
 
-func supportedCurrenciesTextForLanguage(language string) string {
+func supportedCurrenciesText(language string) string {
 	var b strings.Builder
 	b.WriteString(tr(language, "Поддерживаемые валюты. Код пишите так: /from USD или /to EUR\n\n", "Supported currencies. Use codes like /from USD or /to EUR\n\n"))
 	for _, currency := range supportedCurrencies {

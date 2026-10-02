@@ -55,18 +55,3 @@ func TestWriteFileAtomicConcurrentWritersNeverTear(t *testing.T) {
 		t.Fatalf("file is torn after concurrent writes: %v", err)
 	}
 }
-
-func TestQuarantineFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	os.WriteFile(path, []byte("{broken"), 0o600)
-	target, err := QuarantineFile(path, "20260928T000000")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("original file must be moved away")
-	}
-	if raw, _ := os.ReadFile(target); string(raw) != "{broken" {
-		t.Fatalf("quarantined content = %q", raw)
-	}
-}

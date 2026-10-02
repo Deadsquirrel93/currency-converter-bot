@@ -119,13 +119,13 @@ func TestLanguageKeyboardUsesFlagsAndCallbackData(t *testing.T) {
 
 func TestEnglishLocalizedTexts(t *testing.T) {
 	s := session{Language: "en", From: "USD", To: "RUB", Multiplier: 1}
-	settings := settingsTextForLanguage(s, rates.Snapshot{}, languageEnglish, "Europe/Moscow (default)")
+	settings := settingsText(s, rates.Snapshot{}, languageEnglish, "Europe/Moscow (default)")
 	for _, want := range []string{"Settings:", "Language: 🇬🇧 English", "Pair: USD -> RUB", "Rates updated: no data", "Time zone: Europe/Moscow (default)"} {
 		if !strings.Contains(settings, want) {
 			t.Fatalf("English settings must contain %q, got:\n%s", want, settings)
 		}
 	}
-	list := supportedCurrenciesTextForLanguage(languageEnglish)
+	list := supportedCurrenciesText(languageEnglish)
 	for _, want := range []string{"Supported currencies", "USD - US dollar (United States)"} {
 		if !strings.Contains(list, want) {
 			t.Fatalf("English list must contain %q, got:\n%s", want, list)
@@ -138,9 +138,9 @@ func TestEnglishConversionReply(t *testing.T) {
 		"RUB": {Code: "RUB", Nominal: 1, Value: 1},
 		"USD": {Code: "USD", Nominal: 1, Value: 100},
 	}}
-	reply, err := conversionReplyForLanguage(100, 2, "USD", "RUB", 1, 0, 0, false, "", snapshot, languageEnglish)
+	reply, err := conversionReply(100, 2, "USD", "RUB", 1, 0, 0, false, "", snapshot, languageEnglish)
 	if err != nil {
-		t.Fatalf("conversionReplyForLanguage(): %v", err)
+		t.Fatalf("conversionReply(): %v", err)
 	}
 	for _, want := range []string{"Total:", "Lines included: 2", "Rate: 1 USD"} {
 		if !strings.Contains(reply, want) {
@@ -307,7 +307,7 @@ func TestConversionReplyCanSkipModifiers(t *testing.T) {
 		"USD": {Code: "USD", Nominal: 1, Value: 100},
 	}}
 
-	withoutModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, false, "", snapshot)
+	withoutModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, false, "", snapshot, languageRussian)
 	if err != nil {
 		t.Fatalf("conversionReply without modifiers: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestConversionReplyCanSkipModifiers(t *testing.T) {
 		}
 	}
 
-	withModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, true, "", snapshot)
+	withModifiers, err := conversionReply(10000, 1, "UZS", "USD", 1, 50, 50, true, "", snapshot, languageRussian)
 	if err != nil {
 		t.Fatalf("conversionReply with modifiers: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestParseRoundMode(t *testing.T) {
 }
 
 func TestInlineConversionResultUsesHTMLMessage(t *testing.T) {
-	result := inlineConversionResult("100,00 USD = <b>9 000,00 RUB</b>\nКурс: 1 USD = 90,00 RUB")
+	result := inlineConversionResult("100,00 USD = <b>9 000,00 RUB</b>\nКурс: 1 USD = 90,00 RUB", languageRussian)
 	if result.Type != "article" || result.ID == "" {
 		t.Fatalf("inline result = %+v", result)
 	}
@@ -399,7 +399,7 @@ func TestRateReply(t *testing.T) {
 		},
 	}
 
-	got, err := rateReply("USD", "RUB", snapshot)
+	got, err := rateReply("USD", "RUB", snapshot, languageRussian)
 	if err != nil {
 		t.Fatalf("rateReply(): %v", err)
 	}
@@ -416,7 +416,7 @@ func TestRateReply(t *testing.T) {
 
 func TestRateReplyWithHistory(t *testing.T) {
 	baseDate := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
-	snapshots := []rateHistoricalSnapshot{
+	snapshots := []subscriptionHistoricalSnapshot{
 		{Date: baseDate, Snapshot: testRateSnapshot(100)},
 		{Date: baseDate.AddDate(0, 0, -1), Snapshot: testRateSnapshot(98)},
 		{Date: baseDate.AddDate(0, 0, -2), Snapshot: testRateSnapshot(99)},
@@ -427,7 +427,7 @@ func TestRateReplyWithHistory(t *testing.T) {
 		{Date: baseDate.AddDate(0, 0, -7), Snapshot: testRateSnapshot(105)},
 	}
 
-	got, err := rateReplyWithHistory("USD", "RUB", testRateSnapshot(100), snapshots)
+	got, err := rateReplyWithHistory("USD", "RUB", testRateSnapshot(100), snapshots, languageRussian)
 	if err != nil {
 		t.Fatalf("rateReplyWithHistory(): %v", err)
 	}
@@ -465,7 +465,7 @@ func TestFormatSubscriptionRateHistory(t *testing.T) {
 			Date: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 			Rate: 110,
 		},
-	})
+	}, languageRussian)
 
 	for _, want := range []string{
 		"Динамика USD -> RUB:",
@@ -572,7 +572,7 @@ func TestSettingsText(t *testing.T) {
 		ModifyFromPercent: 1.5,
 		ModifyToPercent:   -2,
 		Timezone:          "Asia/Tashkent",
-	}, rates.Snapshot{FetchedAt: time.Date(2026, 5, 10, 9, 30, 0, 0, time.UTC)})
+	}, rates.Snapshot{FetchedAt: time.Date(2026, 5, 10, 9, 30, 0, 0, time.UTC)}, languageRussian, "Asia/Tashkent")
 
 	for _, want := range []string{
 		"Пара: USD -> RUB",
@@ -593,7 +593,7 @@ func TestSettingsText(t *testing.T) {
 }
 
 func TestBotCommands(t *testing.T) {
-	commands := botCommands()
+	commands := botCommands(languageRussian)
 	got := map[string]bool{}
 	for _, command := range commands {
 		if command.Command == "" {
@@ -639,7 +639,7 @@ func TestWithReplyMarkupCreatesMultipleButtons(t *testing.T) {
 		From:       "UZS",
 		With:       []string{"USD", "EUR", "RUB"},
 		Multiplier: 1,
-	})
+	}, languageRussian)
 	if markup == nil {
 		t.Fatal("withReplyMarkup() = nil")
 	}
@@ -852,7 +852,7 @@ func TestParseTelegramUserIDArgsRejectsUsername(t *testing.T) {
 }
 
 func TestDueSubscriptionsSkipsAlreadySentToday(t *testing.T) {
-	bot := New(config.Config{SubscriptionTimezone: "UTC"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bot := New(config.Config{Location: time.UTC}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	bot.subscriptions = map[int64]dailySubscription{
 		1: {ChatID: 100, From: "USD", To: "RUB", Time: "09:00"},
 		2: {ChatID: 200, From: "EUR", To: "RUB", Time: "09:00", LastSentDate: "2026-05-10"},
@@ -945,25 +945,6 @@ func TestBotDeletesSession(t *testing.T) {
 	}
 }
 
-func TestBotLoadsLegacySingleWithCurrency(t *testing.T) {
-	settingsFile := filepath.Join(t.TempDir(), "user_settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"42":{"from":"UZS","to":"RUB","with":"USD","multiplier":1}}`), 0o644); err != nil {
-		t.Fatalf("WriteFile(%q): %v", settingsFile, err)
-	}
-	cfg := config.Config{
-		DefaultFrom:      "USD",
-		DefaultTo:        "RUB",
-		UserSettingsFile: settingsFile,
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	bot := New(cfg, nil, logger)
-	got := bot.getSession(42)
-	if len(got.With) != 1 || got.With[0] != "USD" {
-		t.Fatalf("With = %#v, want [USD]", got.With)
-	}
-}
-
 func TestInlineLanguage(t *testing.T) {
 	tests := []struct {
 		saved, telegramCode, want string
@@ -991,5 +972,47 @@ func TestParseConversionInputReadsThousandsByLanguage(t *testing.T) {
 	russian, err := parseConversionInput("1,000 usd", session{Language: languageRussian})
 	if err != nil || russian.Amount != 1 {
 		t.Fatalf("russian 1,000 = %v, %v; want 1", russian.Amount, err)
+	}
+}
+
+func TestRoundPrecision(t *testing.T) {
+	for mode, want := range map[string]int{"0": 0, "2": 2, "4": 4, "6": 6} {
+		if got, ok := roundPrecision(mode); !ok || got != want {
+			t.Fatalf("roundPrecision(%q) = %d, %v, want %d, true", mode, got, ok, want)
+		}
+	}
+	if _, ok := roundPrecision(""); ok {
+		t.Fatal(`roundPrecision("") must mean auto`)
+	}
+	if got := formatConvertedAmountForMode(2.5, "0"); got != "3" {
+		t.Fatalf("formatConvertedAmountForMode(2.5, 0) = %q, want 3", got)
+	}
+	if got := formatConvertedAmountForMode(1234.5, "2"); got != "1 234,50" {
+		t.Fatalf("formatConvertedAmountForMode(1234.5, 2) = %q, want 1 234,50", got)
+	}
+}
+
+func TestBotLoadsAllowedUsersIgnoringInvalidIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowed_users.json")
+	if err := os.WriteFile(path, []byte(`[7, 0, -3, 7]`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	bot := New(config.Config{AdminUsers: map[int64]struct{}{1: {}}, AllowedUsersFile: path}, nil, slog.New(slog.DiscardHandler))
+	if !bot.isAllowed(7) || len(bot.allowedUsers) != 1 {
+		t.Fatalf("allowed users = %v, want only 7", bot.allowedUsers)
+	}
+}
+
+func TestBotQuarantinesAllowedUsersInUnknownFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowed_users.json")
+	if err := os.WriteFile(path, []byte(`{"7":true}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	bot := New(config.Config{AdminUsers: map[int64]struct{}{1: {}}, AllowedUsersFile: path}, nil, slog.New(slog.DiscardHandler))
+	if bot.isAllowed(7) {
+		t.Fatal("user from an unreadable file must not be allowed")
+	}
+	if matches, _ := filepath.Glob(path + ".corrupt-*"); len(matches) != 1 {
+		t.Fatalf("unreadable file must be kept aside, found %v", matches)
 	}
 }

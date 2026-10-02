@@ -46,7 +46,7 @@ func TestPostErrorDoesNotContainToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	err := bot.post(ctx, "getUpdates", map[string]any{}, &apiResponse{})
+	err := bot.post(ctx, "getUpdates", map[string]any{}, nil)
 	if err == nil {
 		t.Fatal("post() error = nil, want timeout error")
 	}

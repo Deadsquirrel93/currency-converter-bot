@@ -129,11 +129,11 @@ func TestSendPhotoUsesSharedRequestPath(t *testing.T) {
 			return http.StatusOK, `{"ok":true}`
 		})
 		bot := newHardeningBot(t, config.Config{}, url)
-		if err := bot.sendPhoto(t.Context(), 1, []byte("png"), "caption", chartButtonMarkup("USD", "RUB", languageRussian)); err != nil {
+		if err := bot.sendPhoto(t.Context(), 1, []byte("png"), "caption"); err != nil {
 			t.Fatalf("sendPhoto: %v", err)
 		}
 		photos := fake.methodCalls("sendPhoto")
-		if len(photos) != 2 || string(photos[1].File) != "png" || !strings.Contains(fmt.Sprint(photos[1].Payload["reply_markup"]), `"callback_data":"chart:USD:RUB"`) {
+		if len(photos) != 2 || string(photos[1].File) != "png" || photos[1].Payload["caption"] != "caption" {
 			t.Fatalf("sendPhoto calls = %+v", photos)
 		}
 	})
@@ -143,7 +143,7 @@ func TestSendPhotoUsesSharedRequestPath(t *testing.T) {
 		server.Close()
 		cfg := config.Config{TelegramToken: "42:" + testToken, TelegramAPI: server.URL}
 		bot := New(cfg, rates.NewProvider(server.URL, t.TempDir()+"/r.json", time.Hour), slog.New(slog.DiscardHandler))
-		err := bot.sendPhoto(t.Context(), 1, []byte("png"), "caption", nil)
+		err := bot.sendPhoto(t.Context(), 1, []byte("png"), "caption")
 		if err == nil || strings.Contains(err.Error(), testToken) {
 			t.Fatalf("sendPhoto error = %v, want an error without the token", err)
 		}
@@ -154,7 +154,7 @@ func TestSendPhotoUsesSharedRequestPath(t *testing.T) {
 			return http.StatusForbidden, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`
 		})
 		bot := newHardeningBot(t, config.Config{}, url)
-		if err := bot.sendPhoto(t.Context(), 1, []byte("png"), "", nil); !isChatUnreachable(err) {
+		if err := bot.sendPhoto(t.Context(), 1, []byte("png"), ""); !isChatUnreachable(err) {
 			t.Fatalf("sendPhoto error = %v, want an unreachable-chat apiError", err)
 		}
 	})

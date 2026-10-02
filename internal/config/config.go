@@ -11,50 +11,52 @@ import (
 )
 
 type Config struct {
-	TelegramToken        string
-	AdminUsers           map[int64]struct{}
-	AllowedUsers         map[int64]struct{}
-	DefaultFrom          string
-	DefaultTo            string
-	CacheFile            string
-	UserSettingsFile     string
-	AllowedUsersFile     string
-	SubscriptionsFile    string
-	NewRateSubsFile      string
-	AlertsFile           string
-	SubscriptionTimezone string
-	CacheTTL             time.Duration
-	CBRDailyURL          string
-	TelegramAPI          string
+	TelegramToken     string
+	AdminUsers        map[int64]struct{}
+	AllowedUsers      map[int64]struct{}
+	DefaultFrom       string
+	DefaultTo         string
+	CacheFile         string
+	UserSettingsFile  string
+	AllowedUsersFile  string
+	SubscriptionsFile string
+	NewRateSubsFile   string
+	AlertsFile        string
+	// Location is SUBSCRIPTION_TIMEZONE, the zone of users without /tz.
+	Location    *time.Location
+	CacheTTL    time.Duration
+	CBRDailyURL string
+	TelegramAPI string
 }
 
 func Load(path string) (Config, error) {
 	_ = loadDotEnv(path)
 
 	cfg := Config{
-		TelegramToken:        strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		AdminUsers:           map[int64]struct{}{},
-		AllowedUsers:         map[int64]struct{}{},
-		DefaultFrom:          upperOrDefault(os.Getenv("DEFAULT_FROM"), "USD"),
-		DefaultTo:            upperOrDefault(os.Getenv("DEFAULT_TO"), "RUB"),
-		CacheFile:            valueOrDefault(os.Getenv("RATES_CACHE_FILE"), "data/rates_cache.json"),
-		UserSettingsFile:     valueOrDefault(os.Getenv("USER_SETTINGS_FILE"), "data/user_settings.json"),
-		AllowedUsersFile:     valueOrDefault(os.Getenv("ALLOWED_USERS_FILE"), "data/allowed_users.json"),
-		SubscriptionsFile:    valueOrDefault(os.Getenv("SUBSCRIPTIONS_FILE"), "data/subscriptions.json"),
-		NewRateSubsFile:      valueOrDefault(os.Getenv("NEW_RATE_SUBSCRIPTIONS_FILE"), "data/new_rate_subscriptions.json"),
-		AlertsFile:           valueOrDefault(os.Getenv("ALERTS_FILE"), "data/alerts.json"),
-		SubscriptionTimezone: valueOrDefault(os.Getenv("SUBSCRIPTION_TIMEZONE"), "Asia/Tashkent"),
-		CBRDailyURL:          valueOrDefault(os.Getenv("CBR_DAILY_URLS"), valueOrDefault(os.Getenv("CBR_DAILY_URL"), "https://www.cbr.ru/scripts/XML_daily.asp")),
-		TelegramAPI:          strings.TrimRight(valueOrDefault(os.Getenv("TELEGRAM_API_BASE"), "https://api.telegram.org"), "/"),
+		TelegramToken:     strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		AdminUsers:        map[int64]struct{}{},
+		AllowedUsers:      map[int64]struct{}{},
+		DefaultFrom:       upperOrDefault(os.Getenv("DEFAULT_FROM"), "USD"),
+		DefaultTo:         upperOrDefault(os.Getenv("DEFAULT_TO"), "RUB"),
+		CacheFile:         valueOrDefault(os.Getenv("RATES_CACHE_FILE"), "data/rates_cache.json"),
+		UserSettingsFile:  valueOrDefault(os.Getenv("USER_SETTINGS_FILE"), "data/user_settings.json"),
+		AllowedUsersFile:  valueOrDefault(os.Getenv("ALLOWED_USERS_FILE"), "data/allowed_users.json"),
+		SubscriptionsFile: valueOrDefault(os.Getenv("SUBSCRIPTIONS_FILE"), "data/subscriptions.json"),
+		NewRateSubsFile:   valueOrDefault(os.Getenv("NEW_RATE_SUBSCRIPTIONS_FILE"), "data/new_rate_subscriptions.json"),
+		AlertsFile:        valueOrDefault(os.Getenv("ALERTS_FILE"), "data/alerts.json"),
+		CBRDailyURL:       valueOrDefault(os.Getenv("CBR_DAILY_URLS"), valueOrDefault(os.Getenv("CBR_DAILY_URL"), "https://www.cbr.ru/scripts/XML_daily.asp")),
+		TelegramAPI:       strings.TrimRight(valueOrDefault(os.Getenv("TELEGRAM_API_BASE"), "https://api.telegram.org"), "/"),
 	}
 
 	if cfg.TelegramToken == "" {
 		return Config{}, errors.New("TELEGRAM_BOT_TOKEN is required")
 	}
 
-	if err := validateTimezone(cfg.SubscriptionTimezone); err != nil {
+	location, err := loadLocation(valueOrDefault(os.Getenv("SUBSCRIPTION_TIMEZONE"), "Asia/Tashkent"))
+	if err != nil {
 		return Config{}, err
 	}
+	cfg.Location = location
 
 	admins, err := parseUserIDs("TELEGRAM_ADMIN_USER_IDS", os.Getenv("TELEGRAM_ADMIN_USER_IDS"))
 	if err != nil {
@@ -87,27 +89,17 @@ func (c Config) IsAdmin(userID int64) bool {
 	return ok
 }
 
-func (c Config) IsAllowed(userID int64) bool {
-	if c.IsAdmin(userID) {
-		return true
-	}
-	if len(c.AllowedUsers) == 0 && len(c.AdminUsers) == 0 {
-		return true
-	}
-	_, ok := c.AllowedUsers[userID]
-	return ok
-}
-
-// validateTimezone fails fast on a mistyped SUBSCRIPTION_TIMEZONE instead of
-// letting subscriptions silently fire in UTC.
-func validateTimezone(name string) error {
+// loadLocation fails fast on a mistyped SUBSCRIPTION_TIMEZONE instead of
+// letting subscriptions silently fire in UTC; "local" is the server zone.
+func loadLocation(name string) (*time.Location, error) {
 	if strings.EqualFold(name, "local") {
-		return nil
+		return time.Local, nil
 	}
-	if _, err := time.LoadLocation(name); err != nil {
-		return fmt.Errorf("parse SUBSCRIPTION_TIMEZONE: %w", err)
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("parse SUBSCRIPTION_TIMEZONE: %w", err)
 	}
-	return nil
+	return location, nil
 }
 
 func loadDotEnv(path string) error {

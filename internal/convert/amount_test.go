@@ -19,7 +19,7 @@ func TestParseAmount(t *testing.T) {
 	}
 
 	for input, want := range tests {
-		got, err := ParseAmount(input)
+		got, err := ParseAmount(input, Options{})
 		if err != nil {
 			t.Fatalf("ParseAmount(%q): %v", input, err)
 		}
@@ -52,12 +52,12 @@ func TestParseAmountThousandsSeparators(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got, err := ParseAmountWith(tt.input, Options{CommaThousands: tt.commaThousands})
+		got, err := ParseAmount(tt.input, Options{CommaThousands: tt.commaThousands})
 		if err != nil {
-			t.Fatalf("ParseAmountWith(%q, %v): %v", tt.input, tt.commaThousands, err)
+			t.Fatalf("ParseAmount(%q, %v): %v", tt.input, tt.commaThousands, err)
 		}
 		if got != tt.want {
-			t.Fatalf("ParseAmountWith(%q, %v) = %v, want %v", tt.input, tt.commaThousands, got, tt.want)
+			t.Fatalf("ParseAmount(%q, %v) = %v, want %v", tt.input, tt.commaThousands, got, tt.want)
 		}
 	}
 }
@@ -80,7 +80,7 @@ func TestParseAmountMultiplication(t *testing.T) {
 	}
 
 	for input, want := range tests {
-		got, err := ParseAmount(input)
+		got, err := ParseAmount(input, Options{})
 		if err != nil {
 			t.Fatalf("ParseAmount(%q): %v", input, err)
 		}
@@ -91,7 +91,7 @@ func TestParseAmountMultiplication(t *testing.T) {
 }
 
 func TestParseAmountsSumsLines(t *testing.T) {
-	total, count, err := ParseAmounts("100\n200,50\n3.5\n\nabc\n12")
+	total, count, err := ParseAmounts("100\n200,50\n3.5\n\nabc\n12", Options{})
 	if err != nil {
 		t.Fatalf("ParseAmounts() error = %v", err)
 	}
@@ -104,7 +104,7 @@ func TestParseAmountsSumsLines(t *testing.T) {
 }
 
 func TestParseAmountsSumsMultiplications(t *testing.T) {
-	total, count, err := ParseAmounts("70 х 5 литров молока\n12 x 4 кг курицы")
+	total, count, err := ParseAmounts("70 х 5 литров молока\n12 x 4 кг курицы", Options{})
 	if err != nil {
 		t.Fatalf("ParseAmounts() error = %v", err)
 	}
@@ -117,7 +117,7 @@ func TestParseAmountsSumsMultiplications(t *testing.T) {
 }
 
 func TestParseAmountsDoesNotReplaceLetters(t *testing.T) {
-	total, count, err := ParseAmounts("l5\nЗ,5")
+	total, count, err := ParseAmounts("l5\nЗ,5", Options{})
 	if err != nil {
 		t.Fatalf("ParseAmounts() error = %v", err)
 	}
@@ -136,7 +136,7 @@ func TestParseAmountRejectsSeveralNumbers(t *testing.T) {
 		"1O0":                   {"1", "0"},
 		"100 box 2":             {"100", "2"},
 	} {
-		_, err := ParseAmount(input)
+		_, err := ParseAmount(input, Options{})
 		var ambiguous *AmbiguousError
 		if !errors.As(err, &ambiguous) {
 			t.Fatalf("ParseAmount(%q) error = %v, want AmbiguousError", input, err)
@@ -145,24 +145,24 @@ func TestParseAmountRejectsSeveralNumbers(t *testing.T) {
 			t.Fatalf("ParseAmount(%q) numbers = %v, want %v", input, ambiguous.Numbers, want)
 		}
 	}
-	if _, _, err := ParseAmounts("100\n2 кофе по 350"); err == nil {
+	if _, _, err := ParseAmounts("100\n2 кофе по 350", Options{}); err == nil {
 		t.Fatal("ParseAmounts() must reject a message with an ambiguous line")
 	}
 }
 
 func TestParseAmountRejectsTooLarge(t *testing.T) {
 	for _, input := range []string{"99999999999999999999999 usd", "1 000 000 000 000 000 000"} {
-		if _, err := ParseAmount(input); !errors.Is(err, ErrTooLarge) {
+		if _, err := ParseAmount(input, Options{}); !errors.Is(err, ErrTooLarge) {
 			t.Fatalf("ParseAmount(%q) error = %v, want ErrTooLarge", input, err)
 		}
 	}
-	if _, _, err := ParseAmounts("900000000000000\n900000000000000"); !errors.Is(err, ErrTooLarge) {
+	if _, _, err := ParseAmounts("900000000000000\n900000000000000", Options{}); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("ParseAmounts() sum error = %v, want ErrTooLarge", err)
 	}
 }
 
 func TestParseAmountsNoAmount(t *testing.T) {
-	_, _, err := ParseAmounts("abc\n\nusd")
+	_, _, err := ParseAmounts("abc\n\nusd", Options{})
 	if err != ErrNoAmount {
 		t.Fatalf("ParseAmounts() error = %v, want %v", err, ErrNoAmount)
 	}
@@ -180,6 +180,29 @@ func TestFormatMoney(t *testing.T) {
 	for value, want := range tests {
 		if got := FormatMoney(value); got != want {
 			t.Fatalf("FormatMoney(%v) = %q, want %q", value, got, want)
+		}
+	}
+}
+
+func TestFormatFixed(t *testing.T) {
+	for _, tt := range []struct {
+		value    float64
+		decimals int
+		want     string
+	}{
+		{84.4075, 2, "84,41"},
+		{12500, 0, "12 500"},
+		{1234.5, 1, "1 234,5"},
+		{0.0118, 4, "0,0118"},
+		{-1000, 1, "-1 000,0"},
+		{2.5, 0, "3"},
+		{-2.5, 0, "-3"},
+		{1234567.891, -1, "1 234 568"},
+		{1e15, 2, "1 000 000 000 000 000,00"},
+		{0, 6, "0,000000"},
+	} {
+		if got := FormatFixed(tt.value, tt.decimals); got != tt.want {
+			t.Fatalf("FormatFixed(%v, %d) = %q, want %q", tt.value, tt.decimals, got, tt.want)
 		}
 	}
 }

@@ -7,49 +7,33 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
 func (b *Bot) getUpdates(ctx context.Context, offset int64) ([]update, error) {
-	var result getUpdatesResponse
+	var updates []update
 	err := b.post(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         60,
 		"allowed_updates": []string{"message", "callback_query", "inline_query"},
-	}, &result)
-	if err != nil {
-		return nil, err
-	}
-	if !result.OK {
-		return nil, fmt.Errorf("telegram getUpdates failed: %s", result.Description)
-	}
-	return result.Result, nil
+	}, &updates)
+	return updates, err
 }
 
 func (b *Bot) sendMessage(ctx context.Context, chatID int64, text string) error {
-	return b.sendMessageWithMarkup(ctx, chatID, text, nil)
+	return b.sendMessageWithMarkup(ctx, chatID, text, nil, "")
 }
 
-func (b *Bot) sendHTMLMessage(ctx context.Context, chatID int64, text string) error {
-	return b.sendHTMLMessageWithMarkup(ctx, chatID, text, nil)
-}
-
-func (b *Bot) sendMessageWithMarkup(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup) error {
-	return b.sendMessageWithMarkupAndParseMode(ctx, chatID, text, markup, "")
-}
-
-func (b *Bot) sendHTMLMessageWithMarkup(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup) error {
-	return b.sendMessageWithMarkupAndParseMode(ctx, chatID, text, markup, "HTML")
-}
-
-func (b *Bot) sendMessageWithMarkupAndParseMode(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup, parseMode string) error {
-	var result apiResponse
+// sendMessageWithMarkup sends text with optional buttons; parseMode is "" for
+// plain text or "HTML".
+func (b *Bot) sendMessageWithMarkup(ctx context.Context, chatID int64, text string, markup *inlineKeyboardMarkup, parseMode string) error {
 	payload := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
@@ -60,86 +44,50 @@ func (b *Bot) sendMessageWithMarkupAndParseMode(ctx context.Context, chatID int6
 	if parseMode != "" {
 		payload["parse_mode"] = parseMode
 	}
-	err := b.post(ctx, "sendMessage", payload, &result)
-	if err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram sendMessage failed: %s", result.Description)
-	}
-	return nil
+	return b.post(ctx, "sendMessage", payload, nil)
 }
 
-func (b *Bot) sendPhoto(ctx context.Context, chatID int64, photo []byte, caption string, markup *inlineKeyboardMarkup) error {
-	fields := map[string]string{
-		"chat_id": strconv.FormatInt(chatID, 10),
-		"caption": caption,
-	}
-	if markup != nil {
-		raw, err := json.Marshal(markup)
-		if err != nil {
-			return err
-		}
-		fields["reply_markup"] = string(raw)
-	}
-	var result apiResponse
-	if err := b.postMultipart(ctx, "sendPhoto", fields, "photo", "chart.png", "image/png", photo, &result); err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram sendPhoto failed: %s", result.Description)
-	}
-	return nil
+// sendPhoto uploads a PNG; a file can only be sent as multipart/form-data.
+func (b *Bot) sendPhoto(ctx context.Context, chatID int64, photo []byte, caption string) error {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	// Writes to a bytes.Buffer cannot fail.
+	_ = writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	_ = writer.WriteField("caption", caption)
+	header := textproto.MIMEHeader{}
+	header.Set("Content-Disposition", `form-data; name="photo"; filename="chart.png"`)
+	header.Set("Content-Type", "image/png")
+	part, _ := writer.CreatePart(header)
+	_, _ = part.Write(photo)
+	_ = writer.Close()
+	return b.postRaw(ctx, "sendPhoto", body.Bytes(), writer.FormDataContentType(), nil)
 }
 
 // sendChatAction shows "sending photo..." while a slow reply is prepared.
 func (b *Bot) sendChatAction(ctx context.Context, chatID int64, action string) error {
-	var result apiResponse
-	if err := b.post(ctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": action}, &result); err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram sendChatAction failed: %s", result.Description)
-	}
-	return nil
+	return b.post(ctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": action}, nil)
 }
 
 func (b *Bot) answerCallbackQuery(ctx context.Context, callbackQueryID, text string) error {
-	var result apiResponse
 	payload := map[string]any{
 		"callback_query_id": callbackQueryID,
 	}
 	if text != "" {
 		payload["text"] = text
 	}
-	err := b.post(ctx, "answerCallbackQuery", payload, &result)
-	if err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram answerCallbackQuery failed: %s", result.Description)
-	}
-	return nil
+	return b.post(ctx, "answerCallbackQuery", payload, nil)
 }
 
 func (b *Bot) answerInlineQuery(ctx context.Context, inlineQueryID string, results []inlineQueryResultArticle) error {
 	if results == nil {
 		results = []inlineQueryResultArticle{}
 	}
-	var result apiResponse
-	err := b.post(ctx, "answerInlineQuery", map[string]any{
+	return b.post(ctx, "answerInlineQuery", map[string]any{
 		"inline_query_id": inlineQueryID,
 		"results":         results,
 		"cache_time":      0,
 		"is_personal":     true,
-	}, &result)
-	if err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram answerInlineQuery failed: %s", result.Description)
-	}
-	return nil
+	}, nil)
 }
 
 // setBotCommands shows regular users only the commands they can use; admins
@@ -151,10 +99,10 @@ func (b *Bot) setBotCommands(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, adminID := range sortedIDs(b.cfg.AdminUsers) {
+	for _, adminID := range slices.Sorted(maps.Keys(b.cfg.AdminUsers)) {
 		scope := map[string]any{"type": "chat", "chat_id": adminID}
 		for _, language := range []string{"", languageRussian, languageEnglish} {
-			if err := b.setMyCommands(ctx, botCommandsForLanguage(language), language, scope); err != nil {
+			if err := b.setMyCommands(ctx, botCommands(language), language, scope); err != nil {
 				// Fails with "chat not found" until the admin has started the bot.
 				b.log.Warn("set admin commands failed", "admin_id", adminID, "error", err)
 				break
@@ -165,7 +113,6 @@ func (b *Bot) setBotCommands(ctx context.Context) error {
 }
 
 func (b *Bot) setMyCommands(ctx context.Context, commands []botCommand, language string, scope map[string]any) error {
-	var result apiResponse
 	payload := map[string]any{"commands": commands}
 	if language != "" {
 		payload["language_code"] = language
@@ -173,20 +120,14 @@ func (b *Bot) setMyCommands(ctx context.Context, commands []botCommand, language
 	if scope != nil {
 		payload["scope"] = scope
 	}
-	if err := b.post(ctx, "setMyCommands", payload, &result); err != nil {
-		return err
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram setMyCommands failed: %s", result.Description)
-	}
-	return nil
+	return b.post(ctx, "setMyCommands", payload, nil)
 }
 
 // adminCommands are hidden from the command menu of regular users.
 var adminCommands = map[string]bool{"allow": true, "disallow": true, "allowed": true}
 
 func userBotCommands(language string) []botCommand {
-	all := botCommandsForLanguage(language)
+	all := botCommands(language)
 	commands := make([]botCommand, 0, len(all))
 	for _, command := range all {
 		if !adminCommands[command.Command] {
@@ -197,18 +138,9 @@ func userBotCommands(language string) []botCommand {
 }
 
 func (b *Bot) getMe(ctx context.Context) (user, error) {
-	var result struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
-		Result      user   `json:"result"`
-	}
-	if err := b.post(ctx, "getMe", map[string]any{}, &result); err != nil {
-		return user{}, err
-	}
-	if !result.OK {
-		return user{}, fmt.Errorf("telegram getMe failed: %s", result.Description)
-	}
-	return result.Result, nil
+	var me user
+	err := b.post(ctx, "getMe", map[string]any{}, &me)
+	return me, err
 }
 
 // maxRetryAfter caps how long a single call waits after a 429 before its one
@@ -241,44 +173,13 @@ func isChatUnreachable(err error) bool {
 	return apiErr.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Description), "chat not found")
 }
 
+// post sends one Bot API call and decodes its result into target, if any.
 func (b *Bot) post(ctx context.Context, method string, payload any, target any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	return b.postRaw(ctx, method, raw, "application/json", target)
-}
-
-// postMultipart sends fields and one file as multipart/form-data, the only
-// way to upload a file. Nested objects such as reply_markup go in fields as
-// JSON strings.
-func (b *Bot) postMultipart(ctx context.Context, method string, fields map[string]string, fileField, fileName, fileType string, file []byte, target any) error {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		if err := writer.WriteField(key, fields[key]); err != nil {
-			return err
-		}
-	}
-	header := textproto.MIMEHeader{}
-	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, fileField, fileName))
-	header.Set("Content-Type", fileType)
-	part, err := writer.CreatePart(header)
-	if err != nil {
-		return err
-	}
-	if _, err := part.Write(file); err != nil {
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	return b.postRaw(ctx, method, body.Bytes(), writer.FormDataContentType(), target)
 }
 
 // postRaw sends one Bot API request, retrying once after a short 429. Every
@@ -333,14 +234,24 @@ func (b *Bot) postOnce(ctx context.Context, method string, raw []byte, contentTy
 			RetryAfter:  time.Duration(failure.Parameters.RetryAfter) * time.Second,
 		}
 	}
-	return json.NewDecoder(resp.Body).Decode(target)
+	var envelope struct {
+		OK          bool            `json:"ok"`
+		Description string          `json:"description"`
+		Result      json.RawMessage `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return err
+	}
+	if !envelope.OK {
+		return fmt.Errorf("telegram %s failed: %s", method, envelope.Description)
+	}
+	if target == nil || len(envelope.Result) == 0 {
+		return nil
+	}
+	return json.Unmarshal(envelope.Result, target)
 }
 
-func botCommands() []botCommand {
-	return botCommandsForLanguage(languageRussian)
-}
-
-func botCommandsForLanguage(language string) []botCommand {
+func botCommands(language string) []botCommand {
 	if normalizeLanguage(language) == languageEnglish {
 		return []botCommand{
 			{Command: "start", Description: "start the bot"},
@@ -419,17 +330,6 @@ type inlineKeyboardMarkup struct {
 type inlineKeyboardButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
-}
-
-type apiResponse struct {
-	OK          bool   `json:"ok"`
-	Description string `json:"description"`
-}
-
-type getUpdatesResponse struct {
-	OK          bool     `json:"ok"`
-	Description string   `json:"description"`
-	Result      []update `json:"result"`
 }
 
 type update struct {

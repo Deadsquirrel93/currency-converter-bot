@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -184,7 +185,7 @@ func (b *Bot) sendDueSubscriptions(ctx context.Context, now time.Time) {
 			histories[today] = historicalSnapshots
 		}
 		language := b.userLanguage(userID)
-		reply, err := rateReplyWithHistoryForLanguage(subscription.From, subscription.To, snapshot, historicalSnapshots, language)
+		reply, err := rateReplyWithHistory(subscription.From, subscription.To, snapshot, historicalSnapshots, language)
 		if err != nil {
 			b.log.Error("subscription rate reply failed", "user_id", userID, "from", subscription.From, "to", subscription.To, "error", err)
 			continue
@@ -266,18 +267,6 @@ func (b *Bot) markSubscriptionSent(userID int64, sent dailySubscription, date st
 	if err := b.saveSubscriptions(); err != nil {
 		b.log.Error("mark subscription sent failed", "path", b.cfg.SubscriptionsFile, "error", err)
 	}
-}
-
-func loadSubscriptionLocation(name string) (*time.Location, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || strings.EqualFold(name, "local") {
-		return time.Local, nil
-	}
-	location, err := time.LoadLocation(name)
-	if err != nil {
-		return time.Local, err
-	}
-	return location, nil
 }
 
 func parseSubscription(text string, s session) (dailySubscription, error) {
@@ -377,16 +366,8 @@ func (b *Bot) saveSubscriptions() error {
 	return b.subscriptionsStore.save(func() any {
 		b.subMu.RLock()
 		defer b.subMu.RUnlock()
-		return copySubscriptions(b.subscriptions)
+		return maps.Clone(b.subscriptions)
 	})
-}
-
-func copySubscriptions(subscriptions map[int64]dailySubscription) map[int64]dailySubscription {
-	result := make(map[int64]dailySubscription, len(subscriptions))
-	for userID, subscription := range subscriptions {
-		result[userID] = subscription
-	}
-	return result
 }
 
 func normalizeSubscription(subscription dailySubscription) dailySubscription {
@@ -410,6 +391,16 @@ type subscriptionRetry struct {
 	Next     time.Time
 }
 
+// fail records a failed delivery at now and reports whether to give up.
+func (r *subscriptionRetry) fail(now time.Time) (giveUp bool) {
+	r.Failures++
+	if r.Failures > len(subscriptionRetryDelays) {
+		return true
+	}
+	r.Next = now.Add(subscriptionRetryDelays[r.Failures-1])
+	return false
+}
+
 // handleSubscriptionSendError stops retrying every minute: an unreachable chat
 // (bot blocked, removed from the group) drops the subscription, other errors
 // back off and give up for the day.
@@ -426,10 +417,8 @@ func (b *Bot) handleSubscriptionSendError(userID int64, subscription dailySubscr
 	if retry.Date != today {
 		retry = subscriptionRetry{Date: today}
 	}
-	retry.Failures++
-	giveUp := retry.Failures > len(subscriptionRetryDelays)
+	giveUp := retry.fail(localNow)
 	if !giveUp {
-		retry.Next = localNow.Add(subscriptionRetryDelays[retry.Failures-1])
 		b.subRetry[userID] = retry
 	}
 	b.subMu.Unlock()

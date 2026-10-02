@@ -58,8 +58,8 @@ func (s *jsonStore) load(decode func([]byte) error) error {
 		return err
 	}
 	if err := decode(raw); err != nil {
-		target, moveErr := fsutil.QuarantineFile(s.path, time.Now().UTC().Format("20060102T150405"))
-		if moveErr != nil {
+		target := s.path + ".corrupt-" + time.Now().UTC().Format("20060102T150405")
+		if moveErr := os.Rename(s.path, target); moveErr != nil {
 			s.disable(err)
 			return fmt.Errorf("decode %s: %w; could not move it aside, saving disabled: %v", s.path, err, moveErr)
 		}

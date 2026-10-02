@@ -43,13 +43,6 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return syncDir(dir)
 }
 
-// QuarantineFile moves an unreadable file aside so it is kept for manual
-// recovery instead of being overwritten by the next save.
-func QuarantineFile(path, suffix string) (string, error) {
-	target := path + ".corrupt-" + suffix
-	return target, os.Rename(path, target)
-}
-
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {

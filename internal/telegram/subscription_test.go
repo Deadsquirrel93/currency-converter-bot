@@ -43,11 +43,11 @@ func newTestBotWithServers(t *testing.T) (*Bot, func() []sentMessage) {
 	t.Cleanup(tg.Close)
 
 	cfg := config.Config{
-		TelegramToken:        testToken,
-		TelegramAPI:          tg.URL,
-		DefaultFrom:          "USD",
-		DefaultTo:            "RUB",
-		SubscriptionTimezone: "Asia/Tashkent",
+		TelegramToken: testToken,
+		TelegramAPI:   tg.URL,
+		DefaultFrom:   "USD",
+		DefaultTo:     "RUB",
+		Location:      mustLocation(t, "Asia/Tashkent"),
 	}
 	provider := rates.NewProvider(cbr.URL, t.TempDir()+"/rates.json", time.Hour)
 	bot := New(cfg, provider, slog.New(slog.DiscardHandler))
@@ -69,7 +69,7 @@ func chatIDs(messages []sentMessage) []int64 {
 func TestSubscriptionsFireInConfiguredTimezone(t *testing.T) {
 	bot, messages := newTestBotWithServers(t)
 	sent := func() []int64 { return chatIDs(messages()) }
-	if got := bot.subscriptionLocation.String(); got != "Asia/Tashkent" {
+	if got := bot.defaultLocation().String(); got != "Asia/Tashkent" {
 		t.Fatalf("subscription location = %q, want Asia/Tashkent", got)
 	}
 
@@ -120,7 +120,7 @@ func TestSubscribeWithPassedTimeSendsRateNow(t *testing.T) {
 		t.Fatalf("second message = %q, want current rate", got[1].Text)
 	}
 	sub, ok := bot.getUserSubscription(42)
-	if !ok || sub.LastSentDate != subscriptionDate(time.Now().In(bot.subscriptionLocation)) {
+	if !ok || sub.LastSentDate != subscriptionDate(time.Now().In(bot.defaultLocation())) {
 		t.Fatalf("subscription = %+v, want LastSentDate today so the scheduler does not repeat it", sub)
 	}
 }
@@ -137,5 +137,25 @@ func TestDeleteSettingsRemovesSubscription(t *testing.T) {
 	}
 	if got := bot.getSession(42).Language; got != "" {
 		t.Fatalf("language = %q, want it removed", got)
+	}
+}
+
+func TestSubscriptionRetryFailBacksOffThenGivesUp(t *testing.T) {
+	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	var retry subscriptionRetry
+	for i, delay := range subscriptionRetryDelays {
+		if retry.fail(now) {
+			t.Fatalf("fail() #%d gave up, want a retry", i+1)
+		}
+		if retry.Failures != i+1 || !retry.Next.Equal(now.Add(delay)) {
+			t.Fatalf("after fail() #%d: %+v, want next at +%s", i+1, retry, delay)
+		}
+	}
+	next := retry.Next
+	if !retry.fail(now) {
+		t.Fatal("fail() after the last delay must give up")
+	}
+	if !retry.Next.Equal(next) {
+		t.Fatalf("giving up must not move Next, got %s", retry.Next)
 	}
 }

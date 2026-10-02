@@ -71,7 +71,7 @@ func (b *Bot) sendChart(ctx context.Context, chatID int64, from, to, language st
 		_ = b.sendMessage(ctx, chatID, tr(language, "Не хватает данных ЦБ для графика. Попробуйте чуть позже.", "Not enough Bank of Russia data for a chart. Please try again later."))
 		return
 	}
-	if err := b.sendPhoto(ctx, chatID, image, chartCaption(from, to, points, language), nil); err != nil {
+	if err := b.sendPhoto(ctx, chatID, image, chartCaption(from, to, points, language)); err != nil {
 		b.log.Warn("send chart failed", "chat_id", chatID, "error", err)
 	}
 }

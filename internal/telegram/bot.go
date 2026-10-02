@@ -16,17 +16,16 @@ import (
 )
 
 type Bot struct {
-	cfg                  config.Config
-	rates                *rates.Provider
-	client               *http.Client
-	log                  *slog.Logger
-	mu                   sync.RWMutex
-	sessions             map[int64]session
-	accessMu             sync.RWMutex
-	allowedUsers         map[int64]struct{}
-	subMu                sync.RWMutex
-	subscriptions        map[int64]dailySubscription
-	subscriptionLocation *time.Location
+	cfg           config.Config
+	rates         *rates.Provider
+	client        *http.Client
+	log           *slog.Logger
+	mu            sync.RWMutex
+	sessions      map[int64]session
+	accessMu      sync.RWMutex
+	allowedUsers  map[int64]struct{}
+	subMu         sync.RWMutex
+	subscriptions map[int64]dailySubscription
 
 	sessionsStore      *jsonStore
 	subscriptionsStore *jsonStore
@@ -55,32 +54,27 @@ type Bot struct {
 const updateTimeout = 60 * time.Second
 
 func New(cfg config.Config, provider *rates.Provider, logger *slog.Logger) *Bot {
-	subscriptionLocation, err := loadSubscriptionLocation(cfg.SubscriptionTimezone)
-	if err != nil {
-		logger.Warn("load subscription timezone failed", "timezone", cfg.SubscriptionTimezone, "error", err)
-	}
 	b := &Bot{
-		cfg:                  cfg,
-		rates:                provider,
-		client:               &http.Client{Timeout: 70 * time.Second},
-		log:                  logger,
-		sessions:             map[int64]session{},
-		allowedUsers:         map[int64]struct{}{},
-		subscriptions:        map[int64]dailySubscription{},
-		subscriptionLocation: subscriptionLocation,
-		sessionsStore:        newJSONStore(cfg.UserSettingsFile),
-		subscriptionsStore:   newJSONStore(cfg.SubscriptionsFile),
-		allowedUsersStore:    newJSONStore(cfg.AllowedUsersFile),
-		limiter:              newUserLimiter(updatesPerMinute, time.Minute),
-		blockedNotices:       newUserLimiter(1, blockedNoticeInterval),
-		subRetry:             map[int64]subscriptionRetry{},
-		newRateSubs:          map[int64]newRateSubscription{},
-		newRateRetry:         map[int64]subscriptionRetry{},
-		newRateStore:         newJSONStore(cfg.NewRateSubsFile),
-		alerts:               map[int64]userAlerts{},
-		alertRetry:           map[alertKey]subscriptionRetry{},
-		alertsStore:          newJSONStore(cfg.AlertsFile),
-		botID:                botIDFromToken(cfg.TelegramToken),
+		cfg:                cfg,
+		rates:              provider,
+		client:             &http.Client{Timeout: 70 * time.Second},
+		log:                logger,
+		sessions:           map[int64]session{},
+		allowedUsers:       map[int64]struct{}{},
+		subscriptions:      map[int64]dailySubscription{},
+		sessionsStore:      newJSONStore(cfg.UserSettingsFile),
+		subscriptionsStore: newJSONStore(cfg.SubscriptionsFile),
+		allowedUsersStore:  newJSONStore(cfg.AllowedUsersFile),
+		limiter:            newUserLimiter(updatesPerMinute, time.Minute),
+		blockedNotices:     newUserLimiter(1, blockedNoticeInterval),
+		subRetry:           map[int64]subscriptionRetry{},
+		newRateSubs:        map[int64]newRateSubscription{},
+		newRateRetry:       map[int64]subscriptionRetry{},
+		newRateStore:       newJSONStore(cfg.NewRateSubsFile),
+		alerts:             map[int64]userAlerts{},
+		alertRetry:         map[alertKey]subscriptionRetry{},
+		alertsStore:        newJSONStore(cfg.AlertsFile),
+		botID:              botIDFromToken(cfg.TelegramToken),
 	}
 	if err := b.loadSessions(); err != nil {
 		b.log.Error("load user settings failed", "error", err)
@@ -248,7 +242,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update update) {
 	case isCommand(text, "/allowed"):
 		b.showAllowedUsers(ctx, chatID, userID)
 	case isCommand(text, "/list"):
-		_ = b.sendMessage(ctx, chatID, supportedCurrenciesTextForLanguage(lang))
+		_ = b.sendMessage(ctx, chatID, supportedCurrenciesText(lang))
 	case isCommand(text, "/settings"):
 		b.showSettings(ctx, chatID, userID)
 	case isCommand(text, "/rate"):
@@ -354,7 +348,7 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 	}
 
 	s := b.getSession(userID)
-	reply, err := conversionReplyForLanguage(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, s.Round, snapshot, language)
+	reply, err := conversionReply(request.Amount, 1, request.From, request.To, request.Multiplier, request.ModifyFromPercent, request.ModifyToPercent, request.UseModify, s.Round, snapshot, language)
 	if err != nil {
 		_ = b.answerCallbackQuery(ctx, query.ID, tr(language, "Не удалось перевести", "Conversion failed"))
 		_ = b.sendMessage(ctx, query.Message.Chat.ID, fmt.Sprintf("%s. %s", errorText(err, language), tr(language, "Проверьте настройки.", "Check your settings.")))
@@ -362,7 +356,7 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query callbackQuery) {
 	}
 
 	_ = b.answerCallbackQuery(ctx, query.ID, "")
-	_ = b.sendHTMLMessage(ctx, query.Message.Chat.ID, reply)
+	_ = b.sendMessageWithMarkup(ctx, query.Message.Chat.ID, reply, nil, "HTML")
 }
 
 func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
@@ -401,14 +395,14 @@ func (b *Bot) handleInlineQuery(ctx context.Context, query inlineQuery) {
 	}
 
 	settings := conversionSettingsForInput(s, request)
-	reply, err := conversionReplyForLanguage(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot, language)
+	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot, language)
 	if err != nil {
 		_ = b.answerInlineQuery(ctx, query.ID, nil)
 		return
 	}
 
 	_ = b.answerInlineQuery(ctx, query.ID, []inlineQueryResultArticle{
-		inlineConversionResultForLanguage(reply, language),
+		inlineConversionResult(reply, language),
 	})
 }
 

@@ -4,7 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -98,11 +99,11 @@ func (b *Bot) showAllowedUsers(ctx context.Context, chatID, adminID int64) {
 	}
 
 	b.accessMu.RLock()
-	dynamic := sortedIDs(b.allowedUsers)
+	dynamic := slices.Sorted(maps.Keys(b.allowedUsers))
 	b.accessMu.RUnlock()
 
-	admins := sortedIDs(b.cfg.AdminUsers)
-	envAllowed := sortedIDs(b.cfg.AllowedUsers)
+	admins := slices.Sorted(maps.Keys(b.cfg.AdminUsers))
+	envAllowed := slices.Sorted(maps.Keys(b.cfg.AllowedUsers))
 	language := b.userLanguage(adminID)
 	if len(admins) == 0 && len(envAllowed) == 0 && len(dynamic) == 0 {
 		_ = b.sendMessage(ctx, chatID, tr(language, "Whitelist пустой: бот сейчас открыт для всех пользователей.", "The whitelist is empty: the bot is open to everyone."))
@@ -153,7 +154,9 @@ func (b *Bot) addAllowedUserIDs(ids []int64) ([]int64, []int64) {
 			b.log.Error("save allowed users failed", "path", b.cfg.AllowedUsersFile, "error", err)
 		}
 	}
-	return sortedInt64s(added), sortedInt64s(already)
+	slices.Sort(added)
+	slices.Sort(already)
+	return added, already
 }
 
 func (b *Bot) removeAllowedUserIDs(ids []int64) ([]int64, []int64, []int64) {
@@ -185,7 +188,10 @@ func (b *Bot) removeAllowedUserIDs(ids []int64) ([]int64, []int64, []int64) {
 			b.log.Error("save allowed users failed", "path", b.cfg.AllowedUsersFile, "error", err)
 		}
 	}
-	return sortedInt64s(removed), sortedInt64s(protected), sortedInt64s(missing)
+	slices.Sort(removed)
+	slices.Sort(protected)
+	slices.Sort(missing)
+	return removed, protected, missing
 }
 
 func parseTelegramUserIDArgs(args string) ([]int64, error) {
@@ -231,13 +237,15 @@ func parseTelegramUserIDArgs(args string) ([]int64, error) {
 
 func (b *Bot) loadAllowedUsers() error {
 	return b.allowedUsersStore.load(func(raw []byte) error {
-		users, err := unmarshalAllowedUserIDs(raw)
-		if err != nil {
+		var ids []int64
+		if err := json.Unmarshal(raw, &ids); err != nil {
 			return err
 		}
 		b.accessMu.Lock()
-		for _, userID := range users {
-			b.allowedUsers[userID] = struct{}{}
+		for _, id := range ids {
+			if id > 0 {
+				b.allowedUsers[id] = struct{}{}
+			}
 		}
 		b.accessMu.Unlock()
 		return nil
@@ -248,61 +256,8 @@ func (b *Bot) saveAllowedUsers() error {
 	return b.allowedUsersStore.save(func() any {
 		b.accessMu.RLock()
 		defer b.accessMu.RUnlock()
-		return sortedIDs(b.allowedUsers)
+		return slices.Sorted(maps.Keys(b.allowedUsers))
 	})
-}
-
-func unmarshalAllowedUserIDs(raw []byte) ([]int64, error) {
-	var ids []int64
-	if err := json.Unmarshal(raw, &ids); err == nil {
-		return normalizeUserIDs(ids), nil
-	}
-
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil {
-		return nil, err
-	}
-
-	ids = make([]int64, 0, len(object))
-	for key := range object {
-		id, err := strconv.ParseInt(key, 10, 64)
-		if err != nil || id <= 0 {
-			return nil, fmt.Errorf("parse allowed user id %q", key)
-		}
-		ids = append(ids, id)
-	}
-	return normalizeUserIDs(ids), nil
-}
-
-func normalizeUserIDs(ids []int64) []int64 {
-	seen := map[int64]struct{}{}
-	result := make([]int64, 0, len(ids))
-	for _, id := range ids {
-		if id <= 0 {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		result = append(result, id)
-	}
-	return sortedInt64s(result)
-}
-
-func sortedIDs(users map[int64]struct{}) []int64 {
-	ids := make([]int64, 0, len(users))
-	for userID := range users {
-		ids = append(ids, userID)
-	}
-	return sortedInt64s(ids)
-}
-
-func sortedInt64s(ids []int64) []int64 {
-	sort.Slice(ids, func(i, j int) bool {
-		return ids[i] < ids[j]
-	})
-	return ids
 }
 
 func formatIDs(ids []int64) string {

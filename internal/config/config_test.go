@@ -3,34 +3,8 @@ package config
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
-
-func TestConfigIsAllowedAllowsEveryoneWhenWhitelistEmpty(t *testing.T) {
-	cfg := Config{AllowedUsers: map[int64]struct{}{}}
-	if !cfg.IsAllowed(42) {
-		t.Fatal("IsAllowed() = false, want true for empty whitelist")
-	}
-}
-
-func TestConfigIsAllowedChecksWhitelistWhenConfigured(t *testing.T) {
-	cfg := Config{AllowedUsers: map[int64]struct{}{42: {}}}
-	if !cfg.IsAllowed(42) {
-		t.Fatal("IsAllowed(42) = false, want true")
-	}
-	if cfg.IsAllowed(7) {
-		t.Fatal("IsAllowed(7) = true, want false")
-	}
-}
-
-func TestConfigIsAllowedAllowsAdmins(t *testing.T) {
-	cfg := Config{AdminUsers: map[int64]struct{}{42: {}}, AllowedUsers: map[int64]struct{}{}}
-	if !cfg.IsAllowed(42) {
-		t.Fatal("IsAllowed(42) = false, want true for admin")
-	}
-	if cfg.IsAllowed(7) {
-		t.Fatal("IsAllowed(7) = true, want false when admins enable restricted mode")
-	}
-}
 
 func TestParseUserIDsRejectsTextTokens(t *testing.T) {
 	if _, err := parseUserIDs("TELEGRAM_ADMIN_USER_IDS", "42,admin"); err == nil {
@@ -65,8 +39,8 @@ func TestLoadSubscriptionDefaults(t *testing.T) {
 	if cfg.AllowedUsersFile != "data/allowed_users.json" {
 		t.Fatalf("AllowedUsersFile = %q, want data/allowed_users.json", cfg.AllowedUsersFile)
 	}
-	if cfg.SubscriptionTimezone != "Asia/Tashkent" {
-		t.Fatalf("SubscriptionTimezone = %q, want Asia/Tashkent", cfg.SubscriptionTimezone)
+	if cfg.Location == nil || cfg.Location.String() != "Asia/Tashkent" {
+		t.Fatalf("Location = %v, want Asia/Tashkent", cfg.Location)
 	}
 }
 
@@ -81,7 +55,16 @@ func TestLoadRejectsUnknownTimezone(t *testing.T) {
 	}
 
 	t.Setenv("SUBSCRIPTION_TIMEZONE", "local")
-	if _, err := Load(filepath.Join(t.TempDir(), ".env")); err != nil {
+	cfg, err := Load(filepath.Join(t.TempDir(), ".env"))
+	if err != nil {
 		t.Fatalf("Load() with local timezone: %v", err)
+	}
+	if cfg.Location != time.Local {
+		t.Fatalf("Location = %v, want time.Local", cfg.Location)
+	}
+
+	t.Setenv("SUBSCRIPTION_TIMEZONE", "Europe/Moscow")
+	if cfg, err = Load(filepath.Join(t.TempDir(), ".env")); err != nil || cfg.Location.String() != "Europe/Moscow" {
+		t.Fatalf("Load() = %v, %v, want Europe/Moscow", cfg.Location, err)
 	}
 }

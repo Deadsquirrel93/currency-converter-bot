@@ -29,7 +29,7 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 	}
 
 	settings := conversionSettingsForInput(s, request)
-	reply, err := conversionReplyForLanguage(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot, language)
+	reply, err := conversionReply(request.Amount, request.AmountCount, request.From, request.To, settings.Multiplier, settings.ModifyFromPercent, settings.ModifyToPercent, settings.UseModify, s.Round, snapshot, language)
 	if err != nil {
 		_ = b.sendMessage(ctx, chatID, checkCurrenciesText(language, errorText(err, language)))
 		return
@@ -40,9 +40,9 @@ func (b *Bot) convertMessage(ctx context.Context, chatID, userID int64, text str
 		buttonSession := s
 		buttonSession.From = request.From
 		buttonSession.Multiplier = settings.Multiplier
-		markup = withReplyMarkupForLanguage(request.Amount, buttonSession, language)
+		markup = withReplyMarkup(request.Amount, buttonSession, language)
 	}
-	_ = b.sendHTMLMessageWithMarkup(ctx, chatID, reply, markup)
+	_ = b.sendMessageWithMarkup(ctx, chatID, reply, markup, "HTML")
 }
 
 type conversionInput struct {
@@ -55,7 +55,7 @@ type conversionInput struct {
 
 func parseConversionInput(text string, s session) (conversionInput, error) {
 	options := convert.Options{CommaThousands: normalizeLanguage(s.Language) == languageEnglish}
-	amount, amountCount, err := convert.ParseAmountsWith(text, options)
+	amount, amountCount, err := convert.ParseAmounts(text, options)
 	if err != nil {
 		return conversionInput{}, err
 	}
@@ -108,11 +108,7 @@ func applyPercent(value, percent float64) float64 {
 	return value * (1 + percent/100)
 }
 
-func conversionReply(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, roundMode string, snapshot rates.Snapshot) (string, error) {
-	return conversionReplyForLanguage(amount, amountCount, from, to, multiplier, modifyFromPercent, modifyToPercent, useModify, roundMode, snapshot, languageRussian)
-}
-
-func conversionReplyForLanguage(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, roundMode string, snapshot rates.Snapshot, language string) (string, error) {
+func conversionReply(amount float64, amountCount int, from, to string, multiplier, modifyFromPercent, modifyToPercent float64, useModify bool, roundMode string, snapshot rates.Snapshot, language string) (string, error) {
 	multipliedAmount := amount * multiplier
 	effectiveAmount := multipliedAmount
 	if useModify {
@@ -170,11 +166,7 @@ func formatAmountWithSettings(amount, multipliedAmount, effectiveAmount float64,
 	return fmt.Sprintf("%s (%s -> %s) %s", convert.FormatMoney(amount), convert.FormatMoney(multipliedAmount), convert.FormatMoney(effectiveAmount), currency)
 }
 
-func withReplyMarkup(amount float64, s session) *inlineKeyboardMarkup {
-	return withReplyMarkupForLanguage(amount, s, languageRussian)
-}
-
-func withReplyMarkupForLanguage(amount float64, s session, language string) *inlineKeyboardMarkup {
+func withReplyMarkup(amount float64, s session, language string) *inlineKeyboardMarkup {
 	buttons := make([]inlineKeyboardButton, 0, len(s.With))
 	for _, to := range s.With {
 		data, ok := withCallbackData(amount, s, to)
@@ -194,11 +186,7 @@ func withReplyMarkupForLanguage(amount float64, s session, language string) *inl
 	}
 }
 
-func inlineConversionResult(reply string) inlineQueryResultArticle {
-	return inlineConversionResultForLanguage(reply, languageRussian)
-}
-
-func inlineConversionResultForLanguage(reply, language string) inlineQueryResultArticle {
+func inlineConversionResult(reply, language string) inlineQueryResultArticle {
 	plain := stripTelegramHTML(reply)
 	title := firstLine(plain)
 	if title == "" {

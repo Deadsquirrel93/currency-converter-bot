@@ -6,7 +6,7 @@ import (
 )
 
 func TestSupportedCurrenciesText(t *testing.T) {
-	text := supportedCurrenciesText()
+	text := supportedCurrenciesText(languageRussian)
 	if len(supportedCurrencies) > 50 {
 		t.Fatalf("supportedCurrencies has %d items, want <= 50", len(supportedCurrencies))
 	}

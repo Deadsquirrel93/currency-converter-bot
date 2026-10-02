@@ -11,9 +11,10 @@ import (
 	"image/png"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"currency-converter-bot/internal/convert"
 )
 
 // Output size. Telegram accepts photos up to 10000 for width plus height.
@@ -95,7 +96,7 @@ func Render(title string, points []Point) ([]byte, error) {
 		value := axis.min + float64(i)*axis.step
 		gy := y(value)
 		c.fillRect(plotLeft, gy-0.5, plotRight, gy+0.5, colorGrid)
-		c.text(plotLeft-12, gy, formatValue(value, axis.decimals), 2, colorAxisText, alignRight)
+		c.text(plotLeft-12, gy, convert.FormatFixed(value, axis.decimals), 2, colorAxisText, alignRight)
 	}
 	// Date labels, at most about seven, with light vertical lines.
 	every := max(1, int(math.Ceil(float64(len(points))/7)))
@@ -117,7 +118,7 @@ func Render(title string, points []Point) ([]byte, error) {
 	c.disc(x(last.Date), y(last.Value), 6, colorLine)
 
 	c.text(24, 36, strings.ToUpper(title), 4, colorTitle, alignLeft)
-	c.text(plotRight, 36, formatValue(last.Value, max(2, axis.decimals+1)), 4, colorLine, alignRight)
+	c.text(plotRight, 36, convert.FormatFixed(last.Value, max(2, axis.decimals+1)), 4, colorLine, alignRight)
 	c.text(24+float64(textWidth(strings.ToUpper(title))*4)+24, 40, first.Date.Format("02.01.2006")+" - "+last.Date.Format("02.01.2006"), 2, colorAxisText, alignLeft)
 
 	var out bytes.Buffer
@@ -164,27 +165,6 @@ func niceAxis(lo, hi float64, target int) axisRange {
 		count:    int(math.Round((end-start)/step)) + 1,
 		decimals: max(0, int(-math.Floor(math.Log10(step)))),
 	}
-}
-
-// formatValue writes value the way the bot does: "12 345,67".
-func formatValue(value float64, decimals int) string {
-	formatted := strconv.FormatFloat(value, 'f', decimals, 64)
-	sign := ""
-	if strings.HasPrefix(formatted, "-") {
-		sign, formatted = "-", formatted[1:]
-	}
-	whole, fraction, hasFraction := strings.Cut(formatted, ".")
-	var grouped strings.Builder
-	for i, r := range whole {
-		if i > 0 && (len(whole)-i)%3 == 0 {
-			grouped.WriteByte(' ')
-		}
-		grouped.WriteRune(r)
-	}
-	if hasFraction {
-		return sign + grouped.String() + "," + fraction
-	}
-	return sign + grouped.String()
 }
 
 type alignment int
